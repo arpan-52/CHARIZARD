@@ -1,0 +1,28 @@
+2024-06-30 03:29:03,060 - tech_logger - WARNING - Directory 'spw0' already exists.
+2024-06-30 03:29:03,060 - tech_logger - WARNING - Directory 'spw1' already exists.
+2024-06-30 03:29:03,060 - tech_logger - WARNING - Directory 'spw2' already exists.
+2024-06-30 03:29:03,060 - tech_logger - WARNING - Directory 'spw3' already exists.
+2024-06-30 03:29:03,060 - tech_logger - DEBUG - Current working directory: /Users/arpan/GMRT_pipe
+2024-06-30 03:29:03,060 - tech_logger - DEBUG - Changed to directory: /Users/arpan/GMRT_pipe/spw0
+2024-06-30 03:29:03,060 - tech_logger - WARNING - 'caltables' in 'spw0' already exists.
+2024-06-30 03:29:03,061 - tech_logger - DEBUG - Current working directory: /Users/arpan/GMRT_pipe
+2024-06-30 03:29:03,061 - tech_logger - DEBUG - Changed to directory: /Users/arpan/GMRT_pipe/spw1
+2024-06-30 03:29:03,061 - tech_logger - WARNING - 'caltables' in 'spw1' already exists.
+2024-06-30 03:29:03,061 - tech_logger - DEBUG - Current working directory: /Users/arpan/GMRT_pipe
+2024-06-30 03:29:03,061 - tech_logger - DEBUG - Changed to directory: /Users/arpan/GMRT_pipe/spw2
+2024-06-30 03:29:03,061 - tech_logger - WARNING - 'caltables' in 'spw2' already exists.
+2024-06-30 03:29:03,061 - tech_logger - DEBUG - Current working directory: /Users/arpan/GMRT_pipe
+2024-06-30 03:29:03,061 - tech_logger - DEBUG - Changed to directory: /Users/arpan/GMRT_pipe/spw3
+2024-06-30 03:29:03,061 - tech_logger - WARNING - 'caltables' in 'spw3' already exists.
+2024-06-30 03:29:03,061 - tech_logger - DEBUG - Current working directory: /Users/arpan/GMRT_pipe
+2024-06-30 03:29:03,061 - tech_logger - DEBUG - Changed to directory: /Users/arpan/GMRT_pipe/spw0
+2024-06-30 03:29:03,062 - tech_logger - WARNING - 'skepticals' in 'spw0' already exists.
+2024-06-30 03:29:03,062 - tech_logger - DEBUG - Current working directory: /Users/arpan/GMRT_pipe
+2024-06-30 03:29:03,062 - tech_logger - DEBUG - Changed to directory: /Users/arpan/GMRT_pipe/spw1
+2024-06-30 03:29:03,062 - tech_logger - WARNING - 'skepticals' in 'spw1' already exists.
+2024-06-30 03:29:03,062 - tech_logger - DEBUG - Current working directory: /Users/arpan/GMRT_pipe
+2024-06-30 03:29:03,062 - tech_logger - DEBUG - Changed to directory: /Users/arpan/GMRT_pipe/spw2
+2024-06-30 03:29:03,062 - tech_logger - WARNING - 'skepticals' in 'spw2' already exists.
+2024-06-30 03:29:03,062 - tech_logger - DEBUG - Current working directory: /Users/arpan/GMRT_pipe
+2024-06-30 03:29:03,062 - tech_logger - DEBUG - Changed to directory: /Users/arpan/GMRT_pipe/spw3
+2024-06-30 03:29:03,062 - tech_logger - WARNING - 'skepticals' in 'spw3' already exists.
