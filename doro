@@ -1,0 +1,16 @@
+# Name is super....
+
+
+# First get some idea of what it contains and what it has in terms of ..... Let us first bother about the band 4, 200 MHz, 2048 channels....
+
+First divide as four SPWs......
+
+
+Run Split, and then get everything separated, Cals, phase cals, and sources..as different MSs….super small….
+
+
+Get the initial tables…..while the flagging is going on the source scans…..
+Apply….
+Flag calibrators…
+Get the final tables….while flagging is going on again the sources…
+Apply the solutions…Done..?
