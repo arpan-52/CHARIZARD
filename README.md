@@ -8,9 +8,5 @@
 
 This a highly automated radio interferometric imaging routine, which process the whole band data by treating each spw independently. 
 
-The uGMRT has a convention flip, the code assumes that the convention is taken care of. For reference, look at P.Chandra et al. 2023.
+**The uGMRT has a convention flip, the code assumes that the convention is taken care of. For reference, look at P.Chandra et al. 2023. If you want to change the convention after the data have been recorded then change the Stokes keywords by doing browsetable inside CASA and then changing the Stokes keywords from 5, 6, 7, 8 to 8, 7, 6, 5. This should take care of the flip in the convention.**
 
-Imrovements...
-1. Band specific spw making or asking the user for number of spws.. - Done
-2. More modularity in selecting which jobs to perform. - Done
-3. Adding a function which can automatically flag bad antennas.  - Done
