@@ -1,0 +1,66 @@
+general:
+  working_directory: "./"
+  PBS_or_SLURM: "PBS"
+  casa_dir: "/home/apal/casa-6.6.4-34-py3.8.el8"
+  nodes: 4
+  mem_per_node: 2096 GB
+  max_ppn: 128
+  queue: "workq"
+  preamble: |
+    source ~/.bashrc
+    mamba activate 38data
+
+msinfo:
+  parent_ms: 'G71.ms'
+  number_of_actual_spws: 1
+  number_of_channels_per_spw: 2048
+  number_of_processing_spw: 4
+  amp_cal: "3C286,3C48"
+  phase_cal: "1845+401"
+  leakage_cal: "1845+401"
+  polang_cal: "3C286"
+  source_list: "G71+28"
+
+pipeline:
+  brotherhood: true
+  initialization: true
+  make_the_structure: true
+  flagging_badants: true
+  bad_antenna_list: []
+  get_away_RFIs: true
+  calibration:
+    doit: true
+    flag_source_before_cal: true
+    check_solutions: true
+    applycal_targets: true
+    applycal_cals: true
+    refant: 'C00'
+    leakage_mode: Df
+    flag_after_cal: true
+  imaging_with_debugging:
+    doit: true
+    dirty: true
+    selfcal:
+      doit: true
+      average_and_flag: true
+      freqbin: 10
+      flag_residual: true
+      imsize: 7200
+      cellsize: 1asec
+      phase_cal: 4
+      amp_phase_cal: 2
+      solint: 4min
+      threshold_to_clean: 0.001
+      iterations_to_start: 1000
+      refant: C00
+  ddcal:
+    doit: true
+    msname: combined_src.ms
+    peeling: true
+    awprojection: true
+    imgsize: 7200
+    cellsize: 1asec
+  final_imaging:
+    combine_spw: true
+    stokes: I                     # Either I or for multiple stokes images I, Q, U, V
+

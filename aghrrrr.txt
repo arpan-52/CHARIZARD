@@ -1,0 +1,34 @@
+1. Improve calibration supply UV range
+2. Read calibration tables, see which are bad or not
+3. Check self-calibration loops
+4. DDcal
+5. Remove the CASA from calibration.
+
+Big issues now...
+
+1. Low and mid level RFI
+2. DDcal (spend some time around it, no need to write anything but we will see man, cubical should be good to go!)
+3. 
+
+
+
+# Interesting calibration aspects...
+
+1. Model using polynomials
+2. Towards a better polarimetric calibration 
+3. Full polar beam models, I have to include it. I have to learn how people are solving beams stuff and directions. 
+4. Then we are good to go
+
+
+
+
+1. Flagging: Implement a very fast, sum threshold one over GPU. Nimki_f and Nimki_m
+             APflagger: AI one, should be the one which is final one
+
+APflagger: POOH (Parallel Optimized Outlier Hunter)
+           NAMI (Nonlinear Automated Monotonous filter for Interference), 
+           NIMKI (Nuisance Identification using Machine Knowledge and Inference)
+
+2. Calibration: Implement polynomial one
+
+3. Imaging: Nothing as such 
