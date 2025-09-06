@@ -1,5 +1,4 @@
 from setuptools import setup, find_packages
-
 setup(
     name="charizard",
     version="0.1.0",
@@ -15,6 +14,7 @@ setup(
     },
     package_data={
         'charizard': ['pokedex.yaml'],
+        'charizard.pokeeggs': ['vla_calibrators_from_web.xml'], 
     },
     python_requires=">=3.8",
 )

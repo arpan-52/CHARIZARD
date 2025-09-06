@@ -128,7 +128,7 @@ def write_flag_commands(output_file, mode='w', flags_to_include=None, **kwargs):
         f.write('\n'.join(commands))
 
 def process_spw_field(params):
-    """Enhanced processing with flag handling and robust statistics."""
+    """Enhanced processing with scan-by-scan bad antenna detection."""
     ms_path, spw, field, ant_names, mock_ants = params
     
     try:
@@ -147,30 +147,25 @@ def process_spw_field(params):
             unique_scans = np.unique(scans)
             num_ants = len(ant_names)
             
-            # Get active antennas for this field/spw
-            active_ants = np.unique(np.concatenate([ant1, ant2]))
-            ant_mask = np.zeros(num_ants, dtype=bool)
-            ant_mask[active_ants] = True
+            # Handle different polarization setups
+            npols = data.shape[-1]
             
-            # Initialize antenna statistics
-            ant_stats = defaultdict(lambda: {
-                'total_samples': 0,
-                'flagged_samples': 0,
+            # Store bad antennas per scan
+            scan_bad_antennas = {}
+            
+            # First pass: calculate global reference amplitude across all scans
+            global_ant_stats = defaultdict(lambda: {
                 'valid_amplitudes': [],
                 'is_active': False
             })
             
-            # Handle different polarization setups
-            npols = data.shape[-1]
-            
-            # Process each baseline
+            # Collect all amplitudes for global reference
             for i in range(len(data)):
                 a1, a2 = ant1[i], ant2[i]
                 
                 # Calculate amplitude based on polarization setup
                 if npols == 4:  # Full polarization
-                    # Use XX and YY, checking flags for each
-                    pol_flags = flags[i, :, 0] | flags[i, :, 3]  # OR of XX and YY flags
+                    pol_flags = flags[i, :, 0] | flags[i, :, 3]
                     valid_mask = ~pol_flags
                     if np.any(valid_mask):
                         amp = (np.abs(data[i, valid_mask, 0]) + 
@@ -186,70 +181,114 @@ def process_spw_field(params):
                     if np.any(valid_mask):
                         amp = np.abs(data[i, valid_mask, 0])
                 
-                # Update statistics for both antennas
+                # Update global statistics for both antennas
                 for ant in [a1, a2]:
-                    ant_stats[ant]['is_active'] = True
-                    ant_stats[ant]['total_samples'] += len(valid_mask)
-                    ant_stats[ant]['flagged_samples'] += np.sum(~valid_mask)
+                    global_ant_stats[ant]['is_active'] = True
                     if np.any(valid_mask):
-                        ant_stats[ant]['valid_amplitudes'].extend(amp.tolist())
+                        global_ant_stats[ant]['valid_amplitudes'].extend(amp.tolist())
             
-            # Analyze antenna statistics
+            # Calculate global reference amplitude
+            good_amps = []
+            for ant in range(num_ants):
+                stats = global_ant_stats[ant]
+                if stats['is_active'] and len(stats['valid_amplitudes']) > 0:
+                    med_amp = np.median(stats['valid_amplitudes'])
+                    if med_amp > 0:
+                        good_amps.append(med_amp)
+            
+            if not good_amps:
+                return None
+            
+            # Use 75th percentile as reference
+            reference_amp = np.percentile(good_amps, 75)
+            threshold = reference_amp * 0.05  # 5% threshold
+            
+            # Second pass: Process each scan separately
+            for scan in unique_scans:
+                # Get data for this specific scan
+                scan_mask = scans == scan
+                scan_indices = np.where(scan_mask)[0]
+                
+                if len(scan_indices) == 0:
+                    continue
+                
+                # Initialize antenna statistics for this scan
+                scan_ant_stats = defaultdict(lambda: {
+                    'total_samples': 0,
+                    'flagged_samples': 0,
+                    'valid_amplitudes': [],
+                    'is_active': False
+                })
+                
+                # Process baselines for this scan
+                for idx in scan_indices:
+                    a1, a2 = ant1[idx], ant2[idx]
+                    
+                    # Calculate amplitude based on polarization setup
+                    if npols == 4:  # Full polarization
+                        pol_flags = flags[idx, :, 0] | flags[idx, :, 3]
+                        valid_mask = ~pol_flags
+                        if np.any(valid_mask):
+                            amp = (np.abs(data[idx, valid_mask, 0]) + 
+                                  np.abs(data[idx, valid_mask, 3])) / 2
+                    elif npols == 2:  # Dual polarization
+                        pol_flags = flags[idx, :, 0] | flags[idx, :, 1]
+                        valid_mask = ~pol_flags
+                        if np.any(valid_mask):
+                            amp = (np.abs(data[idx, valid_mask, 0]) + 
+                                  np.abs(data[idx, valid_mask, 1])) / 2
+                    else:  # Single polarization
+                        valid_mask = ~flags[idx, :, 0]
+                        if np.any(valid_mask):
+                            amp = np.abs(data[idx, valid_mask, 0])
+                    
+                    # Update statistics for both antennas in this scan
+                    for ant in [a1, a2]:
+                        scan_ant_stats[ant]['is_active'] = True
+                        scan_ant_stats[ant]['total_samples'] += len(valid_mask)
+                        scan_ant_stats[ant]['flagged_samples'] += np.sum(~valid_mask)
+                        if np.any(valid_mask):
+                            scan_ant_stats[ant]['valid_amplitudes'].extend(amp.tolist())
+                
+                # Identify bad antennas in this scan
+                scan_bad_ants = []
+                for ant in range(num_ants):
+                    stats = scan_ant_stats[ant]
+                    if (stats['is_active'] and 
+                        len(stats['valid_amplitudes']) > 0 and
+                        ant not in mock_ants):
+                        
+                        # Calculate flag percentage for this scan
+                        flag_percent = (stats['flagged_samples'] / 
+                                      stats['total_samples'] * 100 if 
+                                      stats['total_samples'] > 0 else 100)
+                        
+                        # Skip if heavily flagged in this scan
+                        if flag_percent > 90:
+                            continue
+                        
+                        med_amp = np.median(stats['valid_amplitudes'])
+                        if med_amp < threshold:
+                            scan_bad_ants.append({
+                                'name': ant_names[ant],
+                                'median_amplitude': med_amp,
+                                'ratio_to_reference': med_amp/reference_amp,
+                                'flag_percentage': flag_percent
+                            })
+                
+                if scan_bad_ants:
+                    scan_bad_antennas[scan] = scan_bad_ants
+            
+            # Create results structure
             results = {
                 'field': field,
                 'spw': spw,
                 'mock_antennas': [ant_names[i] for i in mock_ants],
-                'fully_flagged_antennas': [],
-                'dead_antennas': [],
-                'reference_amplitude': None
+                'scan_bad_antennas': scan_bad_antennas,
+                'reference_amplitude': reference_amp
             }
             
-            # Calculate reference amplitude from good antennas
-            good_amps = []
-            for ant in range(num_ants):
-                stats = ant_stats[ant]
-                if stats['is_active']:
-                    # Calculate flag percentage
-                    flag_percent = (stats['flagged_samples'] / 
-                                  stats['total_samples'] * 100 if 
-                                  stats['total_samples'] > 0 else 100)
-                    
-                    if flag_percent > 90:
-                        results['fully_flagged_antennas'].append({
-                            'name': ant_names[ant],
-                            'flag_percentage': flag_percent
-                        })
-                    elif len(stats['valid_amplitudes']) > 0:
-                        med_amp = np.median(stats['valid_amplitudes'])
-                        if med_amp > 0:  # Only use non-zero amplitudes
-                            good_amps.append(med_amp)
-            
-            if not good_amps:
-                return results
-            
-            # Use 75th percentile as reference
-            reference_amp = np.percentile(good_amps, 75)
-            results['reference_amplitude'] = reference_amp
-            threshold = reference_amp * 0.001  # 0.1% threshold
-            
-            # Identify dead antennas
-            for ant in range(num_ants):
-                stats = ant_stats[ant]
-                if (stats['is_active'] and 
-                    len(stats['valid_amplitudes']) > 0 and
-                    ant not in mock_ants):
-                    
-                    med_amp = np.median(stats['valid_amplitudes'])
-                    if med_amp < threshold:
-                        results['dead_antennas'].append({
-                            'name': ant_names[ant],
-                            'median_amplitude': med_amp,
-                            'ratio_to_reference': med_amp/reference_amp,
-                            'flag_percentage': (stats['flagged_samples'] / 
-                                             stats['total_samples'] * 100)
-                        })
             sel.close()
-            
             return results
             
     except Exception as e:
@@ -274,19 +313,32 @@ def find_dead_antennas(ms_path, output_file, n_processes=None):
     with Pool(n_processes) as pool:
         all_results = pool.map(process_spw_field, tasks)
     
+    # Aggregate results by antenna across all field/spw combinations
+    antenna_scan_map = defaultdict(lambda: defaultdict(set))  # antenna -> field -> set of scans
+    
+    for result in all_results:
+        if result and result['scan_bad_antennas']:
+            field = result['field']
+            for scan, bad_ants in result['scan_bad_antennas'].items():
+                for ant_info in bad_ants:
+                    ant_name = ant_info['name']
+                    antenna_scan_map[ant_name][field].add(scan)
+    
     # Write results to badants.txt
     with open(output_file, 'w') as f:
-        for result in all_results:
-            if result and result['dead_antennas']:
-                bad_ants = [ant['name'] for ant in result['dead_antennas']]
-                if bad_ants:
-                    f.write(f"mode='manual' antenna='{','.join(bad_ants)}' reason='dead_antenna'\n")
-                    f.write("mode='summary'\n\n")
+        for ant_name, field_scans in antenna_scan_map.items():
+            for field, scan_set in field_scans.items():
+                if scan_set:
+                    scan_list = sorted(list(scan_set))
+                    scan_str = ','.join(map(str, scan_list))
+                    f.write(f"mode='manual' antenna='{ant_name}' field='{field}' scan='{scan_str}' reason='dead_antenna'\n")
+        
+        if antenna_scan_map:
+            f.write("mode='summary'\n\n")
     
     print(f"\nBad antenna results written to: {output_file}")
     print_runtime(start_total)
     return all_results
-
 
 import os
 import subprocess
@@ -405,8 +457,16 @@ ERROR_WHITELIST = [
    "[TerminalIPythonApp] ERROR | Failed to create history session",
    "sqlite3.OperationalError: database is locked",
    "getcell::TIME   Exception Reported: TableProxy::getCell: no such row",
-   "TableProxy::getCell: no such row"
+   "TableProxy::getCell: no such row",
+   "Error '0:0' does not overlap",
+   "warnings.warn(errors[info][0], RuntimeWarning)"
+   "Leap second table TAI_UTC seems out-of-date",
+   "Until the table is updated (see the CASA documentation or your system admin)",
+   "times and coordinates derived from UTC could be wrong by 1s or more."
 ]
+
+
+
 
 def check_error_whitelist(error_line, whitelist, match_threshold=3):
    for white_error in whitelist:
@@ -527,8 +587,6 @@ def wait_for_field_jobs_to_finish(job_info, base_output_dir, logger, prefix, sch
                     failed_jobs.append(failure_id)
     
     return all_successful, failed_jobs
-
-
 
 def wait_for_wsclean_jobs(job_info_list, base_output_dir, logger, prefix, scheduler):
     """Wait for multiple wsclean jobs to finish and check their status."""
@@ -653,6 +711,230 @@ def wait_for_combine_ms_job(job_id: str, base_output_dir: str, logger: logging.L
             
     return all_successful, failed_jobs
 
+def wait_for_pybdsf_jobs(job_info, base_output_dir, logger, mask_name, scheduler):
+    """
+    Wait for PyBDSF jobs to finish and check their log files.
+    
+    Parameters:
+    -----------
+    job_info : list
+        List of (job_id, field) tuples
+    base_output_dir : str
+        Base output directory
+    logger : logging.Logger
+        Logger object
+    mask_name : str
+        Name of the mask being created
+    scheduler : str
+        Scheduler type ('PBS' or 'SLURM')
+        
+    Returns:
+    --------
+    tuple
+        (successful_fields, failed_fields) lists
+    """
+    all_successful = True
+    failed_jobs = []
+    
+    # Make a copy to avoid modifying the list during iteration
+    pending_jobs = job_info.copy()
+    
+    while pending_jobs:
+        time.sleep(10)
+        for job_info in pending_jobs[:]:  # Use a slice to safely modify during iteration
+            job_id, field = job_info
+            
+            if not check_job_status(job_id, scheduler):
+                pending_jobs.remove(job_info)
+                
+                # Field-specific log file paths
+                field_output_dir = f"images/{field}"
+                log_file = os.path.join(base_output_dir, field_output_dir, f"pybdsf_{mask_name}.log")
+                
+                try:
+                    if os.path.exists(log_file):
+                        with open(log_file, 'r') as log:
+                            log_content = log.read()
+                            logger.debug(f"Checking PyBDSF log for field {field}...")
+                            
+                            error_patterns = [
+                                "exception occurred",
+                                "error",
+                                "Segmentation fault",
+                                "killed",
+                                "core dumped",
+                                "Exception"
+                            ]
+                            
+                            error_lines = []
+                            for line in log_content.split('\n'):
+                                for error in error_patterns:
+                                    if error.lower() in line.lower():
+                                        logger.debug(f"Found potential error line: {line}")
+                                        if not check_error_whitelist(line, ERROR_WHITELIST):
+                                            error_lines.append(line)
+                            
+                            # Check for successful completion marker
+                            success_marker = f"Created WSClean mask: {field_output_dir}/masks/{mask_name}.fits"
+                            if success_marker in log_content and not error_lines:
+                                logger.info(f"PyBDSF job {job_id} for field {field} completed successfully.")
+                            else:
+                                if error_lines:
+                                    logger.error(f"PyBDSF job {job_id} for field {field} failed. Errors found:")
+                                    for line in error_lines:
+                                        logger.error(line.strip())
+                                else:
+                                    logger.error(f"PyBDSF job {job_id} for field {field} failed. No completion marker found.")
+                                all_successful = False
+                                failed_jobs.append(field)
+                    else:
+                        logger.error(f"PyBDSF log file not found: {log_file}")
+                        all_successful = False
+                        failed_jobs.append(field)
+                except Exception as e:
+                    logger.error(f"Error checking PyBDSF log file for field {field}: {str(e)}")
+                    logger.debug(f"Exception details:", exc_info=True)
+                    all_successful = False
+                    failed_jobs.append(field)
+    
+    return all_successful, failed_jobs
+
+def wait_for_ddcal_jobs(job_info_list, base_output_dir, logger, prefix, scheduler):
+    """
+    Wait for DD calibration jobs to finish and check their log files.
+    
+    Parameters:
+    - job_info_list: List of (job_id, field) tuples
+    - base_output_dir: Base output directory
+    - logger: Logger instance
+    - prefix: Prefix for log files
+    - scheduler: PBS or SLURM
+    
+    Returns:
+    - all_successful: Boolean indicating if all jobs were successful
+    - failed_jobs: List of fields that failed
+    """
+    all_successful = True
+    failed_jobs = []
+    
+    # Make a copy to avoid modifying the list during iteration
+    pending_jobs = job_info_list.copy()
+    
+    while pending_jobs:
+        time.sleep(10)
+        for job_info in pending_jobs[:]:
+            job_id, field = job_info
+            
+            if not check_job_status(job_id, scheduler):
+                pending_jobs.remove(job_info)
+                
+                # DD calibration specific log file path
+                log_file = os.path.join(base_output_dir, f"ddcal_output/{field}/logs/{prefix}_{field}.log")
+                
+                if os.path.exists(log_file):
+                    with open(log_file, 'r') as log:
+                        log_content = log.read()
+                        error_lines = [line for line in log_content.split('\n') if 'error' in line.lower()]
+                        error_found = any(not check_error_whitelist(line, ERROR_WHITELIST) for line in error_lines)
+                        
+                        if error_found:
+                            logger.error(f"{prefix} job {job_id} for field {field} failed. Check log file {log_file}.")
+                            logger.error("Error lines found:")
+                            for line in error_lines:
+                                if not check_error_whitelist(line, ERROR_WHITELIST):
+                                    logger.error(line)
+                            all_successful = False
+                            failed_jobs.append(field)
+                        else:
+                            logger.info(f"{prefix} job {job_id} for field {field} completed successfully.")
+                else:
+                    logger.error(f"{prefix} log file not found: {log_file}")
+                    all_successful = False
+                    failed_jobs.append(field)
+    
+    return all_successful, failed_jobs
+
+
+def wait_for_ddcal_wsclean_jobs(job_info_list, base_output_dir, logger, prefix, scheduler):
+    """
+    Wait for DD calibration WSClean jobs to finish and check their log files.
+    
+    Parameters:
+    - job_info_list: List of (job_id, field) tuples
+    - base_output_dir: Base output directory
+    - logger: Logger instance
+    - prefix: Prefix for log files
+    - scheduler: PBS or SLURM
+    
+    Returns:
+    - all_successful: Boolean indicating if all jobs were successful
+    - failed_jobs: List of fields that failed
+    """
+    all_successful = True
+    failed_jobs = []
+    
+    # Make a copy to avoid modifying the list during iteration
+    pending_jobs = job_info_list.copy()
+    
+    while pending_jobs:
+        time.sleep(10)
+        for job_info in pending_jobs[:]:
+            job_id, field = job_info
+            
+            if not check_job_status(job_id, scheduler):
+                pending_jobs.remove(job_info)
+                
+                # DD calibration WSClean specific log file path
+                log_file = os.path.join(base_output_dir, f"ddcal_output/{field}/logs/wsclean_{prefix}_{field}.log")
+                
+                try:
+                    if os.path.exists(log_file):
+                        with open(log_file, 'r') as log:
+                            log_content = log.read()
+                            logger.debug(f"Checking WSClean log for field {field}...")
+                            
+                            wsclean_errors = [
+                                "Could not parse value",
+                                "exception occurred",
+                                "An exception occured",
+                                "error",
+                                "Segmentation fault",
+                                "killed",
+                                "core dumped",
+                                "Exception"
+                            ]
+                            
+                            error_lines = []
+                            for line in log_content.split('\n'):
+                                for error in wsclean_errors:
+                                    if error.lower() in line.lower():
+                                        logger.debug(f"Found potential error line: {line}")
+                                        if not check_error_whitelist(line, ERROR_WHITELIST):
+                                            error_lines.append(line)
+                            
+                            if error_lines:
+                                logger.error(f"WSClean job {job_id} for field {field} failed. Errors found:")
+                                for line in error_lines:
+                                    logger.error(line.strip())
+                                all_successful = False
+                                failed_jobs.append(field)
+                            else:
+                                logger.info(f"WSClean job {job_id} for field {field} completed successfully.")
+                    else:
+                        logger.error(f"WSClean log file not found: {log_file}")
+                        all_successful = False
+                        failed_jobs.append(field)
+                except Exception as e:
+                    logger.error(f"Error checking WSClean log file for field {field}: {str(e)}")
+                    logger.debug(f"Exception details:", exc_info=True)
+                    all_successful = False
+                    failed_jobs.append(field)
+    
+    return all_successful, failed_jobs
+
+
+
+
 def cleanup_files(subband: str, prefix: str, scheduler_type: str, logger: logging.Logger):
     """Clean up job files"""
     try:
@@ -708,3 +990,5 @@ def cleanup_and_exit(job_ids, scheduler_type, logger, exit_code=1):
 
 def remove_lock(ms):
     os.remove('{}/table.lock'.format(ms))
+
+

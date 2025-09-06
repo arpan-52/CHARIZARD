@@ -10,16 +10,48 @@ general:
     source ~/.bashrc
     mamba activate 38data
 
+resources:
+  # Default resources to use when specific job type is not defined
+  default:
+    nodes: 1
+    ppn: 4
+    walltime: "04:00:00"
+
+  flagging:
+    nodes: 2
+    ppn: 8  
+    walltime: "12:00:00"
+
+  cross_calibration:
+    nodes: 2
+    ppn: 8
+    walltime: "12:00:00"
+
+  self_calibration:
+    nodes: 1
+    ppn: 4
+    walltime: "12:00:00"
+
+  imaging:
+    nodes: 1
+    ppn: 8
+    walltime: "24:00:00"
+
 msinfo:
   parent_ms: 'G71.ms'
   number_of_actual_spws: 1
   number_of_channels_per_spw: 2048
   number_of_processing_spw: 4
+  calibrator_auto_detect: true
   amp_cal: "3C286,3C48"
   phase_cal: "1845+401"
   leakage_cal: "1845+401"
   polang_cal: "3C286"
   source_list: "G71+28"
+  uvrange:
+    3C286: "0~56klambda,0~45klambda"
+    3C48: 
+    
 
 pipeline:
   brotherhood: true
@@ -56,11 +88,98 @@ pipeline:
   ddcal:
     doit: true
     msname: combined_src.ms
-    peeling: true
-    awprojection: true
     imgsize: 7200
     cellsize: 1asec
-  final_imaging:
-    combine_spw: true
-    stokes: I                     # Either I or for multiple stokes images I, Q, U, V
-
+    
+    # Modular step control
+    steps:
+      combine_ms: true
+      initial_image: true
+      delay_selfcal: true
+      delay_imaging: true
+      peeling:
+        source_modelling: true    # CrystalBall
+        peeling_gains: true       # QuartiCal DD calibration
+        peeled_images: true       # Final imaging with peeled data
+    
+    # Delay self-calibration parameters
+    delay_selfcal:
+      solver_terms: '[G,K]'
+      solver_iter_recipe: '[50,50,50,50,50,50]'
+      solver_propagate_flags: false
+      solver_robust: false
+      solver_threads: 1
+      solver_convergence_fraction: 0.99
+      solver_convergence_criteria: 1e-06
+      G_type: 'phase'
+      G_time_interval: '10s'
+      G_freq_interval: '0'
+      G_initial_estimate: false
+      G_solve_per: 'antenna'
+      G_interp_mode: 'reim'
+      G_interp_method: '2dlinear'
+      K_time_interval: '1s'
+      K_freq_interval: '0'
+      K_type: 'delay_and_offset'
+      K_initial_estimate: false
+      K_interp_mode: 'reim'
+      K_interp_method: '2dlinear'
+      mad_flags_enable: false
+      mad_flags_threshold_bl: 6
+      mad_flags_threshold_global: 8
+      mad_flags_max_deviation: 1000
+      dask_threads: 6
+      dask_workers: 6
+      dask_scheduler: 'threads'
+    
+    # Delay imaging parameters
+    delay_imaging:
+      niter: 25000
+      save_source_list: true
+    
+    # Peeling parameters
+    peeling:
+      # Source modelling (CrystalBall)
+      source_modelling:
+        crystalball_options: '-po'  # Additional CrystalBall flags
+      
+      # Peeling gains (QuartiCal DD calibration)
+      peeling_gains:
+        solver_terms: '[G,dE]'
+        solver_iter_recipe: '[25,25,10,10]'
+        solver_robust: false
+        solver_propagate_flags: false
+        solver_threads: 1
+        solver_convergence_fraction: 0.99
+        solver_convergence_criteria: 1e-06
+        time_chunk: '300s'
+        freq_chunk: '0'
+        G_type: 'diag_complex'
+        G_solve_per: 'antenna'
+        G_time_interval: '60s'
+        G_freq_interval: '10'
+        G_initial_estimate: false
+        G_interp_mode: 'reim'
+        G_interp_method: '2dlinear'
+        G_respect_scan_boundaries: true
+        dE_direction_dependent: true
+        dE_type: 'complex'
+        dE_time_interval: '60'
+        dE_freq_interval: '60'
+        mad_flags_enable: false
+        mad_flags_threshold_bl: 6
+        mad_flags_threshold_global: 8
+        mad_flags_max_deviation: 1000
+        dask_threads: 6
+        dask_workers: 6
+        dask_scheduler: 'threads'
+        output_column: 'SUBDD_DATA_bright_ext_q'
+      
+      # Peeled images
+      peeled_images:
+        niter: 50000
+        datacolumn: 'SUBDD_DATA_bright_ext_q'
+    
+    # Region files for each field
+    regions:
+      G71+28: ds9.reg

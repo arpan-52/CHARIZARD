@@ -9,12 +9,23 @@ def remove_locks(ms_path):
        os.remove(lock_file)
 
 def calculate_job_resources(config, job_type):
-   max_ppn = config['general']['max_ppn'] 
-   job_types = {
-       'splitting': {'nodes': 1, 'ppn': 1, 'walltime': "08:00:00"},
-       'bad_antenna': {'nodes': 1, 'ppn': min(8, max_ppn), 'walltime': "04:00:00"},
-   }
-   return job_types.get(job_type, {'nodes': 1, 'ppn': 1, 'walltime': "00:30:00"})
+    max_ppn = config['general']['max_ppn']
+    
+    # Use job type if it exists, otherwise use default
+    if job_type in config['resources']:
+        resource = config['resources'][job_type]
+    else:
+        resource = config['resources']['default']
+    
+    # Apply max_ppn limit
+    ppn = min(resource.get('ppn', 1), max_ppn)
+    
+    return {
+        'nodes': resource.get('nodes', 1),
+        'ppn': ppn,
+        'walltime': resource.get('walltime', "00:30:00")
+    }
+
 
 def set_up_directories(num_spw, logger):
    """Create SPW directories with required subdirectories"""
@@ -31,96 +42,9 @@ def set_up_directories(num_spw, logger):
            raise
 
 
-
-# def calculate_spw_ranges(total_spws, channels_per_spw, target_spws):
-#     """Calculate SPW:channel ranges for target number of SPWs"""
-#     total_channels = total_spws * channels_per_spw
-#     channels_per_target = total_channels // target_spws
-    
-#     spw_ranges = {}
-#     for i in range(target_spws):
-#         start_chan = i * channels_per_target
-#         end_chan = (i + 1) * channels_per_target - 1
-#         start_spw = start_chan // channels_per_spw
-#         end_spw = end_chan // channels_per_spw
-        
-#         range_str = []
-#         for spw in range(start_spw, end_spw + 1):
-#             s = max(0, start_chan - spw * channels_per_spw)
-#             e = min(channels_per_spw - 1, end_chan - spw * channels_per_spw)
-#             range_str.append(f"{spw}:{s}~{e}")
-            
-#         spw_ranges[f'spw{i}'] = ';'.join(range_str)
-    
-#     return spw_ranges
-
-
-# def splitting_fields(msname, calibrator, source, casa_dir, channels_per_spw, total_spws, target_spws, scheduler, logger, config):
-#     """Submit jobs to split and combine fields into target number of SPWs"""
-#     # Calculate total channels
-#     total_channels = channels_per_spw * total_spws
-
-#     job_resources = calculate_job_resources(config, 'splitting')
-
-#     spw_ranges = {}
-#     channels_per_target = (total_spws * channels_per_spw) // target_spws
-
-#     for i in range(target_spws):
-#         start = i * channels_per_target
-#         end = ((i + 1) * channels_per_target) - 1
-#         ranges = []
-        
-#         for spw in range(total_spws):
-#             spw_start = max(0, start - (spw * channels_per_spw))
-#             spw_end = min(channels_per_spw - 1, end - (spw * channels_per_spw))
-#             if spw_start <= spw_end:
-#                 ranges.append(f"{spw}:{spw_start}~{spw_end}")
-        
-#         spw_ranges[f'spw{i}'] = ';'.join(ranges)
-
-#     job_info = []
-#     for subband, spw in spw_ranges.items():
-#         casa_script = f"""
-# mstransform(vis='{msname}', spw='{spw}',
-# outputvis='{subband}/cal.ms', field='{calibrator}', datacolumn='data')
-# mstransform(vis='{msname}', spw='{spw}',
-# outputvis='{subband}/src.ms', field='{source}', datacolumn='data')
-#     """
-#         script_file = f"split_{subband}.py"
-#         batch_file = f"split_{subband}{get_script_extension(scheduler)}"
-        
-#         with open(script_file, "w") as f:
-#             f.write(casa_script)
-        
-#         batch_header = create_batch_header(
-#             scheduler_type=scheduler, 
-#             job_name=f"split_{subband}", 
-#             nodes=job_resources['nodes'], 
-#             ppn=job_resources['ppn'],
-#             walltime=job_resources['walltime'], 
-#             output_dir=f"{subband}/split.log", 
-#             queue=config['general']['queue']
-#         )
-        
-#         batch_content = f"""{batch_header}
-#     cd {os.getcwd()}
-#     source ~/.bashrc
-#     micromamba activate 38data
-#     {casa_dir}/bin/casa --nologger --nogui -c {script_file}
-#     """
-#         with open(batch_file, "w") as f:
-#             f.write(batch_content)
-        
-#         job_id = submit_job(batch_file, scheduler, logger)
-#         time.sleep(3)
-#         if job_id:
-#             job_info.append((job_id, subband))
-
-#     return job_info
-
 def calculate_spw_ranges(channels_per_spw, total_spws, target_spws):
     def get_trimmed_channels(n_channels):
-        trim = int(round(n_channels * 0.05))
+        trim = int(round(n_channels * 0.05)) # the central 90% channels are taken for further processing
         start = trim
         end = n_channels - trim - 1
         usable = end - start + 1
@@ -162,7 +86,7 @@ def calculate_spw_ranges(channels_per_spw, total_spws, target_spws):
 def splitting_fields(msname, calibrator, source, casa_dir, channels_per_spw, total_spws, target_spws, scheduler, logger, config):
     """Submit jobs to split and combine fields into target number of SPWs"""
     
-    job_resources = calculate_job_resources(config, 'splitting')
+    job_resources = calculate_job_resources(config, 'default')
     spw_ranges = calculate_spw_ranges(channels_per_spw, total_spws, target_spws)
     
     job_info = []
@@ -210,7 +134,7 @@ def find_BAs(config, logger, tracker):
     scheduler = config['general']['PBS_or_SLURM']
     job_info = []
 
-    job_resources = calculate_job_resources(config, 'bad_antenna')
+    job_resources = calculate_job_resources(config, 'default')
     ppn = job_resources['ppn']
 
     active_spws = tracker.get_active_spws()
@@ -257,9 +181,9 @@ with open('{subband}/badants.txt', mode) as f:
         f.write('\\n')
 
 write_flag_commands('{subband}/badants.txt',mode='a',
-   flags_to_include=['edge', 'quack', 'clip', 'autocorr'],
+   flags_to_include=['quack', 'clip', 'autocorr'],
    nchan=num_channels, nspws = num_spws,edge_percent=5,
-   quack_interval=4.5
+   quack_interval=20
 )
 
 """
@@ -308,29 +232,48 @@ def setup_battle(config, logger, tracker):
         logger.info("Setting up file structure...")
         set_up_directories(config['msinfo']['number_of_processing_spw'], logger)
 
-        msinfo = config['msinfo']
+        if config['msinfo'].get('calibrator_auto_detect', False):
+            try:
+                from .auto_detect_utils import auto_detect_calibrators, get_calibrator_info
+                calibrator_file = auto_detect_calibrators(config, logger)
+                logger.info(f"Calibrator auto-detection completed: {calibrator_file}")
+                
+                cal_info = get_calibrator_info(config, logger)
+                logger.info(f"Using auto-detected calibrators: amp_cal={cal_info['amp_cal']}, phase_cal={cal_info['phase_cal']}, source_list={cal_info['source_list']}")
+            except Exception as e:
+                logger.error(f"Calibrator auto-detection failed: {e}")
+                return False
+        else:
+            # Use original config-based approach
+            cal_info = {
+                'amp_cal': config['msinfo'].get('amp_cal', ''),
+                'phase_cal': config['msinfo'].get('phase_cal', ''),
+                'source_list': config['msinfo'].get('source_list', ''),
+                'leakage_cal': config['msinfo'].get('leakage_cal', ''),
+                'polang_cal': config['msinfo'].get('polang_cal', '')
+            }
+            logger.info(f"Using config calibrators: amp_cal={cal_info['amp_cal']}, phase_cal={cal_info['phase_cal']}, source_list={cal_info['source_list']}")
         
         # Get unique calibrators
         calibrators = set()
         for cal_type in ['amp_cal', 'phase_cal', 'leakage_cal', 'polang_cal']:
-            if msinfo[cal_type]:
-                calibrators.update(msinfo[cal_type].split(','))
+            if cal_info[cal_type]:
+                calibrators.update(cal_info[cal_type].split(','))
         calibrator_string = ','.join(calibrators)
 
         # Submit split jobs
         job_split = splitting_fields(
-            msname=msinfo['parent_ms'],
+            msname=config['msinfo']['parent_ms'],
             calibrator=calibrator_string,
-            source=msinfo['source_list'],
+            source=cal_info['source_list'],  # Use auto-detected or config source_list
             casa_dir=config['general']['casa_dir'],
-            channels_per_spw=msinfo['number_of_channels_per_spw'],
-            total_spws=msinfo['number_of_actual_spws'],
-            target_spws=msinfo['number_of_processing_spw'],
+            channels_per_spw=config['msinfo']['number_of_channels_per_spw'],
+            total_spws=config['msinfo']['number_of_actual_spws'],
+            target_spws=config['msinfo']['number_of_processing_spw'],
             scheduler=config['general']['PBS_or_SLURM'],
             logger=logger,
             config=config
         )
-
 
         job_split_copy = job_split
 

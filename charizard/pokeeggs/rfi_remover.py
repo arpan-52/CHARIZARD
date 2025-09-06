@@ -5,11 +5,21 @@ import time
 
 def calculate_job_resources(config, job_type):
     max_ppn = config['general']['max_ppn']
-    job_types = {
-        'initial_flagging': {'nodes': 2, 'ppn': min(4, max_ppn), 'walltime': "04:00:00"},
-        'general_flagging': {'nodes': 2, 'ppn': min(2, max_ppn), 'walltime': "08:00:00"}
+    
+    # Use job type if it exists, otherwise use default
+    if job_type in config['resources']:
+        resource = config['resources'][job_type]
+    else:
+        resource = config['resources']['default']
+    
+    # Apply max_ppn limit
+    ppn = min(resource.get('ppn', 1), max_ppn)
+    
+    return {
+        'nodes': resource.get('nodes', 1),
+        'ppn': ppn,
+        'walltime': resource.get('walltime', "00:30:00")
     }
-    return job_types.get(job_type, {'nodes': 1, 'ppn': 1, 'walltime': "00:30:00"})
 
 def initial_flagger(ms_names, tracker, logger, config,flag_file=None):
     """Run initial flagging using bad antenna list files"""
@@ -18,7 +28,7 @@ def initial_flagger(ms_names, tracker, logger, config,flag_file=None):
 
     # Get job resources
     total_channels = config['msinfo']['number_of_channels_per_spw'] * (config['msinfo']['number_of_actual_spws'])
-    job_resources = calculate_job_resources(config, 'initial_flagging')
+    job_resources = calculate_job_resources(config, 'flagging')
 
 
     active_spws = tracker.get_active_spws()
@@ -181,7 +191,7 @@ def general_flagger(ms_names, mode, tracker, logger, config, **kwargs):
    scheduler = config['general']['PBS_or_SLURM']
    job_info = []
    
-   job_resources = calculate_job_resources(config, 'general_flagging')
+   job_resources = calculate_job_resources(config, 'flagging')
    active_spws = tracker.get_active_spws()
    
    if not active_spws:
@@ -304,7 +314,7 @@ def nami_flagger(ms_names, tracker, logger, config, **kwargs):
     scheduler = config['general']['PBS_or_SLURM']
     job_info = []
     
-    job_resources = calculate_job_resources(config, 'general_flagging')
+    job_resources = calculate_job_resources(config, 'flagging')
     active_spws = tracker.get_active_spws()
     
     if not active_spws:
@@ -386,7 +396,7 @@ def nami_selfcal_flagger(ms_names, tracker, logger, config, **kwargs):
     """
     scheduler = config['general']['PBS_or_SLURM']
     job_info = []
-    job_resources = calculate_job_resources(config, 'general_flagging')
+    job_resources = calculate_job_resources(config, 'flagging')
     
     if not ms_names:
         logger.warning("No MS names provided for NAMI flagging")
@@ -470,7 +480,7 @@ def general_selfcal_flagger(ms_names, mode, tracker, logger, config, **kwargs):
     """Run automated flagging with configurable parameters"""
     scheduler = config['general']['PBS_or_SLURM']
     job_info = []
-    job_resources = calculate_job_resources(config, 'general_flagging')
+    job_resources = calculate_job_resources(config, 'flagging')
     
     if not ms_names:
         logger.warning(f"No MS names provided for {mode} flagging")

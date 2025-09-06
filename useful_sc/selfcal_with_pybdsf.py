@@ -3,8 +3,6 @@ import os
 import time
 from .utils import *
 from .rfi_remover import * 
-from .auto_detect_utils import *
-import yaml
 
 def convert_jobs_to_tracker_format(job_info):
     """
@@ -51,44 +49,21 @@ def calculate_job_resources(config, job_type):
 
 def prepare_ms(config, logger, tracker):
     """Prepare measurement sets by splitting and flagging for all SPWs and fields."""
+    #    if not config['pipeline']['imaging_with_debugging']['selfcal'].get('average_and_flag', False):
+    #        if os.path.exists('pcal1.ms'):
+    #            logger.info("Found split MS")
+    #            return 'pcal1.ms'
+    #        logger.error("No split MS found and splitting not requested")
+    #        return None
+
     active_spws = tracker.get_active_spws()
     if not active_spws:
         logger.error("No active SPWs")
         return None
 
-    # Handle auto-detection for field selection
-    if config['msinfo'].get('calibrator_auto_detect', False):
-        ms_basename = os.path.basename(config['msinfo']['parent_ms']).replace('.ms', '')
-        calibrator_file = f"{ms_basename}_calibrators.yaml"
-        
-        if not os.path.exists(calibrator_file):
-            logger.warning(f"Calibrator file not found: {calibrator_file}, running auto-detection...")
-            try:
-                from .auto_detect_utils import auto_detect_calibrators
-                auto_detect_calibrators(config, logger)
-            except Exception as e:
-                logger.error(f"Auto-detection failed: {e}")
-                return None
-        
-        if os.path.exists(calibrator_file):
-            with open(calibrator_file, 'r') as f:
-                cal_data = yaml.safe_load(f)
-                source_list = cal_data.get('source_list', '')
-        else:
-            logger.error(f"Auto-detection failed to create calibrator file: {calibrator_file}")
-            return None
-    else:
-        # Use config values
-        source_list = config['msinfo']['source_list']
-
-    # Extract fields from source list
-    field_list = source_list.split(',')
-    field_list = [field.strip() for field in field_list if field.strip()]
-    
-    if not field_list:
-        logger.error("No source fields found")
-        return None
-        
+    # Extract fields from config
+    field_list = config['msinfo']['source_list'].split(',')
+    field_list = [field.strip() for field in field_list]
     logger.info(f"Preparing MS for fields: {field_list}")
 
     scheduler = config['general']['PBS_or_SLURM']
@@ -161,8 +136,10 @@ mstransform(vis='{spw}/src.ms',
 
     if split_successful:
         # Get all field-specific MS files that need flagging
+        field_list = config['msinfo']['source_list'].split(',')
+        field_list = [field.strip() for field in field_list]
         ms_to_flag = []
-
+        
         for spw in active_spws:
             for field in field_list:
                 ms_path = f"{spw}/{field}/pcal1.ms"
@@ -246,163 +223,6 @@ mstransform(vis='{spw}/src.ms',
                                     ms_map[field].append(ms_path)
                         return ms_map
 
-
-
-
-def generate_foresight_masks(config, logger, tracker):
-    """
-    Submit foresight mask generation jobs for all SPWs and fields.
-    
-    Parameters:
-    - config: Configuration dictionary
-    - logger: Logger object
-    - tracker: Job tracker object
-    
-    Returns:
-    - List of (job_id, spw, field) tuples for submitted jobs, or None if failed
-    """
-    logger.info("Submitting foresight mask generation jobs")
-    
-    active_spws = tracker.get_active_spws()
-    if not active_spws:
-        logger.error("No active SPWs")
-        return None
-
-    # Handle auto-detection for field selection
-    if config['msinfo'].get('calibrator_auto_detect', False):
-        ms_basename = os.path.basename(config['msinfo']['parent_ms']).replace('.ms', '')
-        calibrator_file = f"{ms_basename}_calibrators.yaml"
-        
-        if not os.path.exists(calibrator_file):
-            logger.warning(f"Calibrator file not found: {calibrator_file}, running auto-detection...")
-            try:
-                from .auto_detect_utils import auto_detect_calibrators
-                auto_detect_calibrators(config, logger)
-            except Exception as e:
-                logger.error(f"Auto-detection failed: {e}")
-                return None
-        
-        if os.path.exists(calibrator_file):
-            with open(calibrator_file, 'r') as f:
-                cal_data = yaml.safe_load(f)
-                source_list = cal_data.get('source_list', '')
-        else:
-            logger.error(f"Auto-detection failed to create calibrator file: {calibrator_file}")
-            return None
-    else:
-        # Use config values
-        source_list = config['msinfo']['source_list']
-
-    # Extract fields from source list
-    field_list = source_list.split(',')
-    field_list = [field.strip() for field in field_list if field.strip()]
-    
-    if not field_list:
-        logger.error("No source fields found")
-        return None
-
-    # Get imaging parameters for foresight
-    imsize = config['pipeline']['imaging_with_debugging']['selfcal']['imsize']
-    cellsize = config['pipeline']['imaging_with_debugging']['selfcal']['cellsize']
-    
-    # Default source types if not specified
-    source_types = 'S,M,U,L,C,I'
-        
-    logger.info(f"Generating foresight masks for fields: {field_list}")
-    logger.info(f"Using imsize: {imsize}, cellsize: {cellsize}, source_types: {source_types}")
-
-    scheduler = config['general']['PBS_or_SLURM']
-    job_resources = calculate_job_resources(config, 'foresight_masking')
-    job_foresight = []
-
-    for spw in active_spws:
-        for field in field_list:
-            # Check if field-specific MS exists
-            field_ms_path = f"{spw}/{field}/pcal1.ms"
-            if not os.path.exists(field_ms_path):
-                logger.warning(f"MS not found for SPW {spw}, field {field}: {field_ms_path}")
-                continue
-            
-            # Create masks directory for this field
-            mask_dir = f"{spw}/{field}/masks"
-            os.makedirs(mask_dir, exist_ok=True)
-            
-            # Define output mask file path
-            mask_file = f"{mask_dir}/{field}_mask.fits"
-            source_list_file = f"{mask_dir}/{field}_sources.txt"
-            
-            # Create foresight command
-            foresight_command = f"""foresight {field_ms_path} \\
-    --imsize {imsize} \\
-    --cellsize {cellsize} \\
-    --source-types {source_types} \\
-    --output {source_list_file} \\
-    --mask {mask_file}"""
-            
-            # Create batch script
-            script_file = f"foresight_{spw}_{field}.sh"
-            batch_file = f"foresight_{spw}_{field}{get_script_extension(scheduler)}"
-            
-            # Write the command to a script file
-            with open(script_file, "w") as f:
-                f.write(f"""#!/bin/bash
-{foresight_command}
-""")
-            
-            # Make script executable
-            os.chmod(script_file, 0o755)
-            
-            # Create batch header
-            batch_header = create_batch_header(
-                scheduler_type=scheduler,
-                job_name=f"foresight_{spw}_{field}",
-                nodes=job_resources.get('nodes', 1),
-                ppn=job_resources.get('ppn', 1),
-                walltime=job_resources.get('walltime', "01:00:00"),
-                output_dir=f"{spw}/{field}/foresight_{field}.log",
-                queue=config['general']['queue']
-            )
-            
-            batch_content = f"""{batch_header}
-cd {os.getcwd()}
-{config['general']['preamble']}
-bash {script_file}
-"""
-            
-            with open(batch_file, "w") as f:
-                f.write(batch_content)
-            
-            # Submit job
-            logger.info(f"Submitting foresight job for SPW {spw}, field {field}")
-            job_id = submit_job(batch_file, scheduler, logger)
-            if job_id:
-                job_foresight.append((job_id, spw, field))
-            time.sleep(2)
-
-    if not job_foresight:
-        logger.error("No foresight jobs submitted")
-        return None
-
-    logger.info(f"Successfully submitted {len(job_foresight)} foresight mask generation jobs")
-    return job_foresight
-
-
-def get_mask_path(spw, field):
-    """
-    Get the path to the foresight mask file for a given SPW and field.
-    
-    Parameters:
-    - spw: SPW identifier
-    - field: Field name
-    
-    Returns:
-    - Path to the mask file
-    """
-    return f"{spw}/{field}/masks/{field}_mask.fits"
-
-
-
-
 def calibrate_ap(msname, output_ms, config, logger, solint, solname, calmode, solnorm, tracker):
     """Submit calibration jobs for all SPWs and all fields at once."""
     logger.debug(f"Entering calibrate_ap with msname: {msname}, solname: {solname}")
@@ -412,38 +232,9 @@ def calibrate_ap(msname, output_ms, config, logger, solint, solname, calmode, so
     active_spws = tracker.get_active_spws()
     job_cal = []
     
-    # Handle auto-detection for field selection
-    if config['msinfo'].get('calibrator_auto_detect', False):
-        ms_basename = os.path.basename(config['msinfo']['parent_ms']).replace('.ms', '')
-        calibrator_file = f"{ms_basename}_calibrators.yaml"
-        
-        if not os.path.exists(calibrator_file):
-            logger.warning(f"Calibrator file not found: {calibrator_file}, running auto-detection...")
-            try:
-                from .auto_detect_utils import auto_detect_calibrators
-                auto_detect_calibrators(config, logger)
-            except Exception as e:
-                logger.error(f"Auto-detection failed: {e}")
-                return None, None
-        
-        if os.path.exists(calibrator_file):
-            with open(calibrator_file, 'r') as f:
-                cal_data = yaml.safe_load(f)
-                source_list = cal_data.get('source_list', '')
-        else:
-            logger.error(f"Auto-detection failed to create calibrator file: {calibrator_file}")
-            return None, None
-    else:
-        # Use config values
-        source_list = config['msinfo']['source_list']
-
-    # Extract fields from source list
-    field_list = source_list.split(',')
-    field_list = [field.strip() for field in field_list if field.strip()]
-
-    if not field_list:
-        logger.error("No source fields found")
-        return None, None
+    # Get list of fields
+    field_list = config['msinfo']['source_list'].split(',')
+    field_list = [f.strip() for f in field_list]
     
     # Extract the generic prefix from solname (e.g., "pcal1" from "pcal1_J1120+0641")
     generic_prefix = solname.split('_')[0] if '_' in solname else solname
@@ -496,8 +287,6 @@ applycal(vis='{spw}/{field}/{msname}',
 mstransform(vis='{spw}/{field}/{msname}',
           outputvis='{spw}/{field}/{output_ms}',
           datacolumn='corrected')
-
-os.remove(f"{spw}/{field}/{msname}")
 """
             
             script_file = f"{field_solname}_{spw}.py"
@@ -538,7 +327,7 @@ cd {os.getcwd()}
     return job_cal, solname
 
 
-def call_wsclean(msname, config, tracker, logger, niter, field=None, datacolumn='corrected', prefix='', threshold=0.001, use_masks=True):
+def call_wsclean(msname, config, tracker, logger, niter, field=None, datacolumn='corrected', prefix='', threshold=0.001, mask_file=None):
     """Submit wsclean jobs for specific fields or all fields."""
     scheduler = config['general']['PBS_or_SLURM']
     job_resources = calculate_job_resources(config, 'imaging')
@@ -547,38 +336,8 @@ def call_wsclean(msname, config, tracker, logger, niter, field=None, datacolumn=
     
     # Get list of fields if not provided
     if field is None:
-        # Handle auto-detection for field selection
-        if config['msinfo'].get('calibrator_auto_detect', False):
-            ms_basename = os.path.basename(config['msinfo']['parent_ms']).replace('.ms', '')
-            calibrator_file = f"{ms_basename}_calibrators.yaml"
-            
-            if not os.path.exists(calibrator_file):
-                logger.warning(f"Calibrator file not found: {calibrator_file}, running auto-detection...")
-                try:
-                    from .auto_detect_utils import auto_detect_calibrators
-                    auto_detect_calibrators(config, logger)
-                except Exception as e:
-                    logger.error(f"Auto-detection failed: {e}")
-                    return None, None
-            
-            if os.path.exists(calibrator_file):
-                with open(calibrator_file, 'r') as f:
-                    cal_data = yaml.safe_load(f)
-                    source_list = cal_data.get('source_list', '')
-            else:
-                logger.error(f"Auto-detection failed to create calibrator file: {calibrator_file}")
-                return None, None
-        else:
-            # Use config values
-            source_list = config['msinfo']['source_list']
-        
-        # Extract fields from source list
-        field_list = source_list.split(',')
-        field_list = [f.strip() for f in field_list if f.strip()]
-        
-        if not field_list:
-            logger.error("No source fields found")
-            return None, None
+        field_list = config['msinfo']['source_list'].split(',')
+        field_list = [f.strip() for f in field_list]
     else:
         field_list = [field]
     
@@ -588,13 +347,10 @@ def call_wsclean(msname, config, tracker, logger, niter, field=None, datacolumn=
     for current_field in field_list:
         # Build list of MS files for this field
         ms_list = []
-        first_spw = None
         for spw in active_spws:
             field_ms_path = f"{spw}/{current_field}/{msname}"
             if os.path.exists(field_ms_path):
                 ms_list.append(field_ms_path)
-                if first_spw is None:
-                    first_spw = spw
         
         if not ms_list:
             logger.error(f"No {msname} found for field {current_field} in active SPWs")
@@ -607,17 +363,17 @@ def call_wsclean(msname, config, tracker, logger, niter, field=None, datacolumn=
         field_output_dir = f"images/{current_field}"
         os.makedirs(field_output_dir, exist_ok=True)
         
-        # Get mask file path if masks should be used
+        # Handle mask file if provided
         mask_option = ""
-        if use_masks and first_spw is not None:
-            mask_file = get_mask_path(first_spw, current_field)
-            if os.path.exists(mask_file):
-                mask_option = f"-fits-mask {mask_file} \\"
-                logger.info(f"Using mask for field {current_field}: {mask_file}")
+        if mask_file:
+            # Construct field-specific mask path
+            field_mask_path = f"{field_output_dir}/masks/{mask_file}.fits"
+            if os.path.exists(field_mask_path):
+                mask_option = f"-fits-mask {field_mask_path}"
+                logger.info(f"Using mask file: {field_mask_path}")
             else:
-                logger.warning(f"Mask file not found for field {current_field}: {mask_file}")
+                logger.warning(f"Requested mask file not found: {field_mask_path}")
         
-        # Build wsclean command with optional mask
         wsclean_command = f"""wsclean \\
     -name {field_output_dir}/{field_imagename} \\
     -weight briggs 0.0 \\
@@ -634,8 +390,9 @@ def call_wsclean(msname, config, tracker, logger, niter, field=None, datacolumn=
     -intervals-out 1 \\
     -data-column {datacolumn} \\
     -niter {niter} \\
-    -auto-mask 7 \\
-    -auto-threshold 3 \\
+    -auto-mask 5 \\
+    -auto-threshold 2 \\
+    {mask_option} \\
     -gain 0.1 \\
     -mgain 0.7 \\
     -join-channels \\
@@ -646,7 +403,6 @@ def call_wsclean(msname, config, tracker, logger, niter, field=None, datacolumn=
     -elliptical-beam \\
     -padding 1.3 \\
     -parallel-deconvolution 8192 \\
-    {mask_option}
     {' '.join(ms_list)}"""
 
         batch_file = f"{field_imagename}{get_script_extension(scheduler)}"
@@ -685,6 +441,7 @@ cd {os.getcwd()}
     return job_ids, prefix
 
 
+
 def get_solint_sequence(config):
     """Calculate the solint sequence based on configuration."""
     pcal_rounds = config['pipeline']['imaging_with_debugging']['selfcal']['phase_cal']
@@ -712,14 +469,135 @@ def get_solint_sequence(config):
 
 
 
+def run_pybdsf(image_name, output_mask, config, logger, threshold=None, field=None):
+    """
+    Run PyBDSF on an image to create a mask file for WSClean
+    
+    Parameters:
+    -----------
+    image_name : str
+        Base name of the image to process
+    output_mask : str
+        Name of the output mask file
+    config : dict
+        Configuration dictionary
+    logger : logging.Logger
+        Logger object
+    threshold : float, optional
+        Detection threshold (in Jy). If None, use default PyBDSF settings
+    field : str, optional
+        Field name for processing specific fields
+    
+    Returns:
+    --------
+    list
+        List of (job_id, field) tuples for submitted jobs
+    """
+    scheduler = config['general']['PBS_or_SLURM']
+    job_resources = calculate_job_resources(config, 'selfcal')
+    
+    # Handle field-specific processing
+    if field is None:
+        field_list = config['msinfo']['source_list'].split(',')
+        field_list = [f.strip() for f in field_list]
+    else:
+        field_list = [field]
+    
+    logger.info(f"Running PyBDSF for fields: {field_list}")
+    job_ids = []
+    
+    for current_field in field_list:
+        # Set paths for field-specific processing
+        field_dir = f"images/{current_field}"
+        
+        # WSClean produces field-specific image names
+        # Format: prefix_fieldname-MFS-image.fits
+        img_path = f"{field_dir}/{image_name}_{current_field}-MFS-image.fits"
+        
+        # Ensure image exists
+        if not os.path.exists(img_path):
+            logger.warning(f"Image not found: {img_path}")
+            continue
+        
+        # Create PyBDSF script
+        pybdsf_script = f"""
+import bdsf
+import os
+
+# Create directory for masks if it doesn't exist
+mask_dir = '{field_dir}/masks'
+os.makedirs(mask_dir, exist_ok=True)
+
+# Process the image with PyBDSF
+img = bdsf.process_image(
+    '{img_path}',
+    thresh_isl=5.0,
+    thresh_pix=7.0,
+    rms_box=(20, 10),
+    adaptive_rms_box=False,
+    adaptive_thresh=100,
+    rms_box_bright=(10, 5),
+    rms_map=True,
+    mean_map='const',
+    quiet=False,
+    spline_rank=2
+)
+
+# Export the PyBDSF mask directly in the format WSClean needs
+# With 'island_mask', PyBDSF will create a mask with 1s where sources are detected
+# WSClean interprets non-zero values as areas to clean, which is exactly what we want
+mask_file = '{field_dir}/masks/{output_mask}.fits'
+img.export_image(outfile=mask_file, clobber=True, img_type='island_mask')
+
+print(f"Created WSClean mask: {{mask_file}}")
+"""
+        
+        script_file = f"pybdsf_{current_field}_{output_mask}.py"
+        batch_file = f"pybdsf_{current_field}_{output_mask}{get_script_extension(scheduler)}"
+        
+        with open(script_file, "w") as f:
+            f.write(pybdsf_script)
+        
+        # Create batch file with consistent log naming pattern for wait_for_pybdsf_jobs
+        batch_header = create_batch_header(
+            scheduler_type=scheduler,
+            job_name=f"pybdsf_{current_field}_{output_mask}",
+            nodes=job_resources['nodes'],
+            ppn=job_resources['ppn'],
+            walltime=job_resources['walltime'],
+            output_dir=f"{field_dir}/pybdsf_{output_mask}.log",  # Consistent naming pattern
+            queue=config['general']['queue']
+        )
+        
+        batch_content = f"""{batch_header}
+cd {os.getcwd()}
+{config['general']['preamble']}
+python3 {script_file}
+"""
+        
+        with open(batch_file, "w") as f:
+            f.write(batch_content)
+        
+        job_id = submit_job(batch_file, scheduler, logger)
+        if job_id:
+            job_ids.append((job_id, current_field))
+            logger.info(f"Submitted PyBDSF job for field {current_field} with job ID {job_id}")
+        time.sleep(5)
+    
+    if not job_ids:
+        logger.error("No PyBDSF jobs were submitted")
+        return None
+    
+    return job_ids
+
 
 def self_calibration(config, logger, tracker):
-    """Execute self-calibration pipeline with proper job tracking for multiple fields in parallel."""
+    """Execute self-calibration pipeline with PyBDSF masking only at strategic points."""
     if 'selfcal' not in config['pipeline']['imaging_with_debugging']:
         logger.info("Self-calibration not requested")
         return True
     
-    logger.info(f"Starting self-calibration for all fields")
+    logger.info(f"Starting self-calibration with optimized PyBDSF masking")
     
     # Prepare MS files - returns a dictionary of fields to their MS paths
     ms_map = prepare_ms(config, logger, tracker)
@@ -739,34 +617,33 @@ def self_calibration(config, logger, tracker):
     threshold = float(config['pipeline']['imaging_with_debugging']['selfcal']['threshold_to_clean'].replace('mJy','')) * 0.001
     niter = config['pipeline']['imaging_with_debugging']['selfcal']['iterations_to_start']
 
-    # Initial dirty image if requested
+    # Initialize MS tracking dictionary for all fields
+    current_ms_map = ms_map.copy()  # Start with initial MS mapping
+    
+    # Create directory structure for masks
+    for field in field_list:
+        field_dir = f"images/{field}"
+        os.makedirs(f"{field_dir}/masks", exist_ok=True)
+    
+    # 1. Make initial dirty image
     if config['pipeline']['imaging_with_debugging'].get('dirty', False):
-        logger.info(f"Creating dirty images for fields: {field_list}")
-        
-        # Track all field MS paths for imaging
-        all_ms_paths = []
-        for field, ms_paths in ms_map.items():
-            all_ms_paths.extend(ms_paths)
-        
-        # Call wsclean for all fields
+        logger.info(f"Creating dirty images for all fields")
         job_ids, prefix = call_wsclean(
             'pcal1.ms',
             config,
             tracker,
             logger,
-            0,
+            niter,  # Use initial iterations as configured
             field=None,  # Process all fields
             datacolumn='DATA',
             prefix='dirty',
-            threshold=threshold,
-            use_masks=False
+            threshold=threshold
         )
         
         if job_ids:
             # Add jobs to tracker with their respective fields
-            for job_id, field in job_ids:
-                tracker_job = convert_jobs_to_tracker_format([(job_id, field)])
-                tracker.add_jobs(f'dirty_image_{field}', tracker_job)
+            tracker_jobs = convert_jobs_to_tracker_format(job_ids)
+            tracker.add_jobs('dirty_image', tracker_jobs)
                     
             # Wait for all dirty imaging jobs to complete
             dirty_successful, dirty_failed = wait_for_wsclean_jobs(
@@ -779,38 +656,43 @@ def self_calibration(config, logger, tracker):
             
             if not tracker.check_brotherhood(dirty_failed):
                 logger.error(f"Dirty imaging failed for fields: {dirty_failed}")
-                # Extract just the job IDs for cleanup
                 job_id_list = [job_id for job_id, _ in job_ids]
                 cleanup_and_exit(job_id_list, scheduler, logger)
                 return False
     
-    # Initialize MS tracking dictionary for all fields
-    current_ms_map = ms_map.copy()  # Start with initial MS mapping
-
-
-
-    # Generate foresight masks AFTER dirty imaging
-    logger.info("Generating foresight masks for self-calibration")
-    job_foresight = generate_foresight_masks(config, logger, tracker)
-    if job_foresight:
-        tracker_jobs = convert_jobs_to_tracker_format(job_foresight)
-        tracker.add_jobs('foresight_masking', tracker_jobs)
+    # 2. Run PyBDSF ONLY on dirty image to create initial mask
+    logger.info(f"Running PyBDSF on dirty images to create initial masks")
+    pybdsf_jobs = run_pybdsf(
+        'dirty',  # image prefix
+        'initial_mask',  # output mask name
+        config,
+        logger,
+        field=None  # Process all fields
+    )
+    
+    if pybdsf_jobs:
+        tracker_jobs = convert_jobs_to_tracker_format(pybdsf_jobs)
+        tracker.add_jobs('pybdsf_initial', tracker_jobs)
         
-        foresight_successful, foresight_failed = wait_for_field_jobs_to_finish(
-            job_foresight,
+        # Wait for PyBDSF jobs to complete
+        pybdsf_successful, pybdsf_failed = wait_for_pybdsf_jobs(
+            pybdsf_jobs,
             config['general']['working_directory'],
             logger,
-            'foresight',
-            scheduler,
-            field_list
+            'initial_mask',
+            scheduler
         )
         
-        if not tracker.check_brotherhood(foresight_failed):
-            logger.error(f"Foresight mask generation failed")
-            cleanup_and_exit([j[0] for j in job_foresight], scheduler, logger)
+        if not tracker.check_brotherhood(pybdsf_failed):
+            logger.error(f"PyBDSF mask creation failed for fields: {pybdsf_failed}")
+            job_id_list = [job_id for job_id, _ in pybdsf_jobs]
+            cleanup_and_exit(job_id_list, scheduler, logger)
             return False
     
     # Phase calibration rounds
+    # We'll use the same mask throughout all phase calibration rounds
+    current_mask = 'initial_mask'
+    
     for i in range(config['pipeline']['imaging_with_debugging']['selfcal']['phase_cal']):
         logger.info(f"Starting phase calibration round {i+1}")
         
@@ -820,8 +702,8 @@ def self_calibration(config, logger, tracker):
         # Use appropriate solint from sequence
         current_solint = solint_sequence[i]
         logger.info(f"Using solint: {current_solint} for phase cal round {i+1}")
-
-        # Run imaging for all fields
+        
+        # Run imaging for all fields with the current mask
         job_img, img_prefix = call_wsclean(
             'pcal1.ms' if i == 0 else f'pcal{i+1}.ms',
             config,
@@ -832,7 +714,7 @@ def self_calibration(config, logger, tracker):
             datacolumn='DATA',
             prefix=f'selfcal_p{i}',
             threshold=threshold,
-            use_masks=True
+            mask_file=current_mask  # Use current mask file
         )
         
         if job_img:
@@ -882,7 +764,8 @@ def self_calibration(config, logger, tracker):
                     config['general']['working_directory'],
                     logger,
                     f'flag_rflag_pcal{i+1}',
-                    scheduler
+                    scheduler,
+                    field_list
                 )
                 
                 if not tracker.check_brotherhood(flag_failed):
@@ -897,7 +780,7 @@ def self_calibration(config, logger, tracker):
                 config=config,
                 datacolumn='DATA',
                 method='poly',
-                degree=3,it=2,sigma=3,timebin=10,ncpu=8,
+                degree=3,it=2,sigma=5,timebin=10,ncpu=8,
                 prefix=f'pcal{i+1}'
             )
             
@@ -910,7 +793,8 @@ def self_calibration(config, logger, tracker):
                     config['general']['working_directory'],
                     logger,
                     f'flag_nami_pcal{i+1}',
-                    scheduler
+                    scheduler,
+                    field_list
                 )
                 
                 if not tracker.check_brotherhood(flag_failed):
@@ -940,7 +824,8 @@ def self_calibration(config, logger, tracker):
                 config['general']['working_directory'],
                 logger,
                 f'pcal{i+1}',
-                scheduler
+                scheduler,
+                field_list
             )
             
             if not tracker.check_brotherhood(cal_failed):
@@ -967,9 +852,46 @@ def self_calibration(config, logger, tracker):
         threshold /= 1.5
         niter *= 2
 
+    # Create final mask after all phase calibration is done - right before amp-phase calibration
+    final_phase_idx = config['pipeline']['imaging_with_debugging']['selfcal']['phase_cal'] - 1
+    
+    # Only run PyBDSF again if there are amplitude-phase calibration rounds
+    apcal_rounds = config['pipeline']['imaging_with_debugging']['selfcal'].get('amp_phase_cal', 0)
+    
+    if apcal_rounds > 0:
+        logger.info(f"Creating mask after final phase cal round for amp-phase calibration")
+        pybdsf_jobs = run_pybdsf(
+            f'selfcal_p{final_phase_idx}',  # image prefix from last phase cal
+            'final_pcal_mask',  # output mask name
+            config,
+            logger,
+            field=None  # Process all fields
+        )
+        
+        if pybdsf_jobs:
+            tracker_jobs = convert_jobs_to_tracker_format(pybdsf_jobs)
+            tracker.add_jobs('pybdsf_final_pcal', tracker_jobs)
+            
+            # Wait for PyBDSF jobs to complete
+            pybdsf_successful, pybdsf_failed = wait_for_pybdsf_jobs(
+                pybdsf_jobs,
+                config['general']['working_directory'],
+                logger,
+                'final_pcal_mask',
+                scheduler
+            )
+            
+            if not tracker.check_brotherhood(pybdsf_failed):
+                logger.error(f"Final phase cal PyBDSF mask creation failed")
+                job_id_list = [job_id for job_id, _ in pybdsf_jobs]
+                cleanup_and_exit(job_id_list, scheduler, logger)
+                return False
+    
     # Amplitude-phase calibration rounds
     pcal_rounds = config['pipeline']['imaging_with_debugging']['selfcal']['phase_cal']
-    apcal_rounds = config['pipeline']['imaging_with_debugging']['selfcal'].get('amp_phase_cal', 0)
+    
+    # Use the final phase cal mask for all amp-phase calibration rounds
+    ap_mask = 'final_pcal_mask' if apcal_rounds > 0 else current_mask
     
     for i in range(apcal_rounds):
         logger.info(f"Starting amp-phase calibration round {i+1}")
@@ -981,7 +903,7 @@ def self_calibration(config, logger, tracker):
         current_solint = solint_sequence[pcal_rounds + i]
         logger.info(f"Using solint: {current_solint} for amp-phase cal round {i+1}")
 
-        # Run imaging for all fields
+        # Run imaging for all fields with the same mask for all AP rounds
         job_img, img_prefix = call_wsclean(
             f'pcal{pcal_rounds+1}.ms' if i == 0 else f'apcal{i}.ms',
             config,
@@ -992,7 +914,7 @@ def self_calibration(config, logger, tracker):
             datacolumn='DATA',
             prefix=f'selfcal_ap{i}',
             threshold=threshold,
-            use_masks=True
+            mask_file=ap_mask  # Use the same mask for all AP rounds
         )
         
         if job_img:
@@ -1040,7 +962,8 @@ def self_calibration(config, logger, tracker):
                     config['general']['working_directory'],
                     logger,
                     f'flag_rflag_apcal{i+1}',
-                    scheduler
+                    scheduler,
+                    field_list
                 )
                 
                 if not tracker.check_brotherhood(flag_failed):
@@ -1055,7 +978,7 @@ def self_calibration(config, logger, tracker):
                 config=config,
                 datacolumn='DATA',
                 method='poly',
-                degree=3,it=2,sigma=3,timebin=10,ncpu=8,
+                degree=3,it=2,sigma=5,timebin=10,ncpu=8,
                 prefix=f'apcal{i+1}'
             )
             
@@ -1068,7 +991,8 @@ def self_calibration(config, logger, tracker):
                     config['general']['working_directory'],
                     logger,
                     f'flag_nami_apcal{i+1}',
-                    scheduler
+                    scheduler,
+                    field_list
                 )
                 
                 if not tracker.check_brotherhood(flag_failed):
@@ -1098,7 +1022,8 @@ def self_calibration(config, logger, tracker):
                 config['general']['working_directory'],
                 logger,
                 f'apcal{i+1}',
-                scheduler
+                scheduler,
+                field_list
             )
             
             if not tracker.check_brotherhood(cal_failed):
