@@ -49,9 +49,8 @@ msinfo:
   polang_cal: "3C286"
   source_list: "G71+28"
   uvrange:
-    3C286: "0~56klambda,0~45klambda"
+    3C286: "0~56klambda"
     3C48: 
-    
 
 pipeline:
   brotherhood: true
@@ -79,6 +78,7 @@ pipeline:
       flag_residual: true
       imsize: 7200
       cellsize: 1asec
+      use_catalogs: true
       phase_cal: 4
       amp_phase_cal: 2
       solint: 4min

@@ -5,8 +5,6 @@ from .utils import *
 from .rfi_remover import * 
 from .auto_detect_utils import *
 import yaml
-from casacore import tables
-
 
 def convert_jobs_to_tracker_format(job_info):
     """
@@ -316,26 +314,14 @@ def generate_catalogs_and_calibrate(msname, output_ms, config, logger, solint, s
     
     # Hard-coded source types for foresight
     source_types = 'S,M,U,L,C,I'
-    # Convert solint to seconds
-    solint_seconds = int(solint.replace('min', '')) * 60
+    
+    # Convert solint to seconds for quartical
+    solint_seconds = 120  # 2 minutes as requested
     
     # Get reference antenna index (assuming it's an integer or needs conversion)
     refant = config['pipeline']['imaging_with_debugging']['selfcal']['refant']
     # If refant is a string like 'C00', convert to index (you may need to adjust this)
-    
-    # Define function to get antenna index
-    def get_antenna_index(ms_path, antenna_name):
-        try:
-            with tables.table(f"{ms_path}/ANTENNA") as tb:
-                antenna_names = tb.getcol('NAME')
-                if antenna_name in antenna_names:
-                    return list(antenna_names).index(antenna_name)
-                else:
-                    logger.warning(f"Antenna '{antenna_name}' not found. Using default 0")
-                    return 0
-        except Exception as e:
-            logger.error(f"Error reading antenna table: {e}")
-            return 0
+    refant_index = 0  # Default to 0, you might need antenna name to index mapping
     
     logger.info(f"Generating catalogs and calibrating for fields: {field_list}")
     logger.info(f"Using imsize: {imsize}, cellsize: {cellsize}, source_types: {source_types}")
@@ -367,8 +353,6 @@ def generate_catalogs_and_calibrate(msname, output_ms, config, logger, solint, s
             
             # Create field-specific solname for logging
             field_solname = f"{solname}_{field}"
-            # Get antenna index from name
-            refant_index = get_antenna_index(field_ms_path, refant)
             
             # Create batch script directly
             batch_file = f"catalog_cal_{field_solname}_{spw}{get_script_extension(scheduler)}"
@@ -413,8 +397,6 @@ goquartical \\
     solver.iter_recipe=[50] \\
     solver.convergence_fraction=0.95 \\
     solver.reference_antenna={refant_index} \\
-    G.time_interval={solint_seconds} \\
-    G.freq_interval=0 \\
     output.products=[corrected_data] \\
     output.columns=[CORRECTED_DATA] \\
     output.overwrite=True
@@ -845,6 +827,55 @@ def self_calibration(config, logger, tracker):
     # Initialize MS tracking dictionary for all fields
     current_ms_map = ms_map.copy()  # Start with initial MS mapping
 
+    # NEW: Catalog-based self-calibration if requested
+    if config['pipeline']['imaging_with_debugging']['selfcal'].get('use_catalogs', False):
+        logger.info("Running catalog-based self-calibration (foresight + crystalball + quartical)")
+        
+        job_catalog_cal = generate_catalogs_and_calibrate(
+            'pcal1.ms',      # Input MS
+            'catalog1.ms',   # Output MS after catalog-based calibration
+            config,
+            logger,
+            '2min',          # Fixed 2-minute solution interval
+            'catalog1',      # Solution name
+            'phase',         # Phase-only calibration for catalog step
+            tracker
+        )
+        
+        if job_catalog_cal:
+            tracker_jobs = convert_jobs_to_tracker_format(job_catalog_cal)
+            tracker.add_jobs('catalog_calibration', tracker_jobs)
+            
+            catalog_successful, catalog_failed = wait_for_field_jobs_to_finish(
+                job_catalog_cal,
+                config['general']['working_directory'],
+                logger,
+                'catalog_cal',
+                scheduler,
+                field_list
+            )
+            
+            if not tracker.check_brotherhood(catalog_failed):
+                logger.error(f"Catalog-based calibration failed")
+                cleanup_and_exit([j[0] for j in job_catalog_cal], scheduler, logger)
+                return False
+            
+            # Update MS map to use catalog-calibrated MS files
+            for field in field_list:
+                new_ms_list = []
+                for ms_path in current_ms_map[field]:
+                    # Extract SPW and field, replace MS name with catalog1.ms
+                    path_parts = ms_path.split('/')
+                    if len(path_parts) >= 2:
+                        spw = path_parts[0]
+                        field_name = path_parts[1]
+                        new_ms_path = f"{spw}/{field_name}/catalog1.ms"
+                        new_ms_list.append(new_ms_path)
+                
+                current_ms_map[field] = new_ms_list
+            
+            logger.info("Catalog-based calibration completed successfully")
+
     # Phase calibration rounds
     for i in range(config['pipeline']['imaging_with_debugging']['selfcal']['phase_cal']):
         logger.info(f"Starting phase calibration round {i+1}")
@@ -856,9 +887,9 @@ def self_calibration(config, logger, tracker):
         current_solint = solint_sequence[i]
         logger.info(f"Using solint: {current_solint} for phase cal round {i+1}")
 
-        # Input MS - phase cal always starts with pcal1.ms or previous phase cal output
+        # Determine input MS name based on whether catalog calibration was done
         if i == 0:
-            input_ms = 'pcal1.ms'
+            input_ms = 'catalog1.ms' if config['pipeline']['imaging_with_debugging']['selfcal'].get('use_catalogs', False) else 'pcal1.ms'
         else:
             input_ms = f'pcal{i+1}.ms'
 
@@ -910,7 +941,7 @@ def self_calibration(config, logger, tracker):
                 tracker=tracker,
                 logger=logger,
                 config=config,
-                datacolumn='RESIDUAL_DATA',
+                datacolumn='RESIDUAL',
                 prefix=f'pcal{i+1}'
             )
             
@@ -1008,93 +1039,10 @@ def self_calibration(config, logger, tracker):
         threshold /= 1.5
         niter *= 2
 
-    # Get phase cal rounds count for catalog and apcal reference
+    # Amplitude-phase calibration rounds
     pcal_rounds = config['pipeline']['imaging_with_debugging']['selfcal']['phase_cal']
     apcal_rounds = config['pipeline']['imaging_with_debugging']['selfcal'].get('amp_phase_cal', 0)
     
-    # Last phase cal MS
-    last_pcal_ms = f'pcal{pcal_rounds+1}.ms'
-
-    # Catalog-based self-calibration if requested
-    if config['pipeline']['imaging_with_debugging']['selfcal'].get('use_catalogs', False):
-        logger.info("Running catalog-based self-calibration (foresight + crystalball + quartical)")
-        
-        job_catalog_cal = generate_catalogs_and_calibrate(
-            last_pcal_ms,      # Input MS from last phase cal
-            'catalog1.ms',     # Output MS after catalog-based calibration
-            config,
-            logger,
-            '2min',            # Fixed 2-minute solution interval
-            'catalog1',        # Solution name
-            'phase',           # Phase-only calibration for catalog step
-            tracker
-        )
-        
-        if job_catalog_cal:
-            tracker_jobs = convert_jobs_to_tracker_format(job_catalog_cal)
-            tracker.add_jobs('catalog_calibration', tracker_jobs)
-            
-            catalog_successful, catalog_failed = wait_for_field_jobs_to_finish(
-                job_catalog_cal,
-                config['general']['working_directory'],
-                logger,
-                'catalog_cal',
-                scheduler,
-                field_list
-            )
-            
-            if not tracker.check_brotherhood(catalog_failed):
-                logger.error(f"Catalog-based calibration failed")
-                cleanup_and_exit([j[0] for j in job_catalog_cal], scheduler, logger)
-                return False
-            
-            # Image post-catalog
-            job_img_catalog, img_prefix_catalog = call_wsclean(
-                'catalog1.ms',
-                config,
-                tracker,
-                logger,
-                niter,
-                field=None,
-                datacolumn='DATA',
-                prefix='post_catalog',
-                threshold=threshold,
-                use_masks=False
-            )
-            
-            if job_img_catalog:
-                tracker_jobs = convert_jobs_to_tracker_format(job_img_catalog)
-                tracker.add_jobs('image_post_catalog', tracker_jobs)
-                img_successful, img_failed = wait_for_wsclean_jobs(
-                    job_img_catalog,
-                    config['general']['working_directory'],
-                    logger,
-                    'post_catalog',
-                    scheduler
-                )
-                
-                if not tracker.check_brotherhood(img_failed):
-                    logger.error(f"Post-catalog imaging failed")
-                    job_id_list = [job_id for job_id, _ in job_img_catalog]
-                    cleanup_and_exit(job_id_list, scheduler, logger)
-                    return False
-            
-            # Update MS map to use catalog-calibrated MS files
-            for field in field_list:
-                new_ms_list = []
-                for ms_path in current_ms_map[field]:
-                    path_parts = ms_path.split('/')
-                    if len(path_parts) >= 2:
-                        spw = path_parts[0]
-                        field_name = path_parts[1]
-                        new_ms_path = f"{spw}/{field_name}/catalog1.ms"
-                        new_ms_list.append(new_ms_path)
-                
-                current_ms_map[field] = new_ms_list
-            
-            logger.info("Catalog-based calibration completed successfully")
-
-    # Amplitude-phase calibration rounds
     for i in range(apcal_rounds):
         logger.info(f"Starting amp-phase calibration round {i+1}")
         
@@ -1105,15 +1053,9 @@ def self_calibration(config, logger, tracker):
         current_solint = solint_sequence[pcal_rounds + i]
         logger.info(f"Using solint: {current_solint} for amp-phase cal round {i+1}")
 
-        # Input MS - apcal uses catalog output if available, else last phase cal
-        if i == 0:
-            input_ms = 'catalog1.ms' if config['pipeline']['imaging_with_debugging']['selfcal'].get('use_catalogs', False) else last_pcal_ms
-        else:
-            input_ms = f'apcal{i}.ms'
-
         # Run imaging for all fields
         job_img, img_prefix = call_wsclean(
-            input_ms,
+            f'pcal{pcal_rounds+1}.ms' if i == 0 else f'apcal{i}.ms',
             config,
             tracker,
             logger,
@@ -1157,7 +1099,7 @@ def self_calibration(config, logger, tracker):
                 tracker=tracker,
                 logger=logger,
                 config=config,
-                datacolumn='RESIDUAL_DATA',
+                datacolumn='RESIDUAL',
                 prefix=f'apcal{i+1}'
             )
             
@@ -1208,7 +1150,7 @@ def self_calibration(config, logger, tracker):
 
         # Run calibration once for all fields
         job_cal, solname = calibrate_ap(
-            input_ms,
+            f'pcal{pcal_rounds+1}.ms' if i == 0 else f'apcal{i}.ms',
             next_ms,
             config,
             logger,
