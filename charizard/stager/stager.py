@@ -109,7 +109,7 @@ def build_calibration_plan(ms_info: Dict, field_classifications: Dict,
                     logger.warning("Leakage enabled but no leakage calibrator specified")
         
         # Polarization angle calibration
-        if pol_config.get('angle', {}).get('enabled', False):
+        if pol_config.get('angle', False):
             if plan['polangle_cal']:
                 polangle_info = field_classifications.get(plan['polangle_cal'], {})
                 if polangle_info.get('polcal_model'):
