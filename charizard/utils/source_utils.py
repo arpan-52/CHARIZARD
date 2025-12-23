@@ -305,9 +305,14 @@ class CalibratorMatcher:
         # Check against internal models (using canonical name if matched)
         check_name = result['canonical_name'] or field_name
         
-        # CASA flux cal?
-        if any(check_name.upper() == fc.upper() for fc in self.CASA_FLUX_CALS):
+        # CASA flux cal? check both MS field name and canonical name
+        check_names = [field_name]
+        if result['canonical_name']:
+            check_names.append(result['canonical_name'])
+
+        if any(name.upper() in (fc.upper() for fc in self.CASA_FLUX_CALS) for name in check_names):
             result['is_casa_flux_cal'] = True
+
         
         # Known unpolarized?
         for source, data in self.models.get('known_unpolarized', {}).items():
