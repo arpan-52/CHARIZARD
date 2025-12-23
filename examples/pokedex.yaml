@@ -1,0 +1,71 @@
+# pokedex.yaml - Charizard Pipeline Configuration
+# Example configuration for VLA/GMRT observations
+
+# Data paths
+data:
+  ms: /path/to/observation.ms
+  processing_spw: 4  # Number of output SPWs
+
+# Environment
+environment:
+  casa_path: /opt/casa/casa-6.5
+  preamble: |
+    source /etc/profile.d/modules.sh
+    module load python/3.10
+
+# Source configuration
+sources:
+  auto_detect: true
+  overrides:
+    calibrators:
+      flux: 3C286           # Primary flux calibrator
+      phase: J1407+2827     # Phase calibrator
+      leakage: J1407+2827   # Leakage calibrator (unpolarized)
+      pol_angle: 3C286      # Polarization angle calibrator
+
+# Pipeline flow
+flow:
+  initial_calibration_flagging:
+    setup:
+      initialize: true
+      make_structure: true
+      brotherhood: true  # If one job fails, fail all
+    
+    flagging:
+      bad_antennas:
+        auto: true        # Auto-detect bad antennas + find best refant
+        list: []          # User-specified bad antennas
+      rfi: true           # Run TFCrop
+    
+    calibration:
+      refant: null        # If null, auto-detect best antenna
+      pol:
+        leakage:
+          enabled: true
+          mode: Df        # Df, Df+QU
+        angle:
+          enabled: true
+      control:
+        rounds: 2         # Calibration rounds
+        flag_before: true
+        flag_after: true
+      apply:
+        calibrators: true
+        targets: true
+      show_me_plots: true  # Generate diagnostic plots
+  
+  imaging_selfcal:
+    selfcal:
+      imaging:
+        imsize: 4096
+        cellsize: 1asec
+        use_catalogs: false  # Use foresight+crystalball
+      
+      loops:
+        phase: 4          # Phase-only loops
+        amp_phase: 2      # Amp+Phase loops
+        solint: 4min
+        refant: C00
+      
+      clean:
+        start_iters: 1000

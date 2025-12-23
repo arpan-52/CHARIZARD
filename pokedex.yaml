@@ -1,0 +1,70 @@
+environment:
+  working_dir: ./
+  scheduler: pbs
+  casa_path: /home/apal/casa-6.6.4-34-py3.8.el8
+  shell_preamble: |
+    source ~/.bashrc
+    mamba activate 38data
+
+resources:
+  default: {nodes: 1, ppn: 4, walltime: 04:00:00, mem_gb: 128}
+  flagging: {nodes: 2, ppn: 8, walltime: 12:00:00, mem_gb: 512}
+  crosscal: {nodes: 2, ppn: 8, walltime: 12:00:00, mem_gb: 128}
+  selfcal: {nodes: 1, ppn: 4, walltime: 12:00:00, mem_gb: 128}
+  imaging: {nodes: 1, ppn: 8, walltime: 24:00:00, mem_gb: 512}
+
+data:
+  ms: G71.ms
+  processing_spw: 4
+
+sources:
+  auto_detect: true
+  overrides:
+    calibrators: {amp: [3C286, 3C48], phase: 1845+401, leakage: 1845+401, pol_angle: 3C286}
+    uvranges: {"3C286": "0~56klambda", "3C48": ""}
+
+flow:
+  initial_calibration_flagging:
+    setup: {initialize: true, make_structure: true, brotherhood: true}
+    flagging: {bad_antennas: {auto: true, list: []}, rfi: true}
+    calibration:
+      refant: C00
+      pol: {leakage: {mode: Df}, angle: true}
+      control: {check_solutions: true, flag_before: true, flag_after: true}
+      apply: {targets: true, calibrators: true}
+
+  imaging_selfcal:
+    dirty_image: true
+    selfcal:
+      avg_flag: true
+      freqbin: 10
+      flag_residuals: true
+      imaging: {imsize: 7200, cellsize: 1asec, use_catalogs: true}
+      loops: {phase: 4, amp_phase: 2, solint: 4min, refant: C00}
+      clean: {threshold: 0.001, start_iters: 1000}
+
+  dd_cal:
+    ms: combined_src.ms
+    geom: {imsize: 7200, cellsize: 1asec}
+    steps: {combine_ms: true, initial_image: true, delay_selfcal: true, delay_imaging: true, peeling: true}
+    delay_selfcal:
+      terms: [G, K]
+      iter_recipe: [50,50,50,50,50,50]
+      convergence: {fraction: 0.99, criteria: 1e-06}
+      G: {type: phase, interval: 10s, per: antenna, interp: {mode: reim, method: 2dlinear}}
+      K: {type: delay_and_offset, interval: 1s}
+      flags: {mad: {enabled: false, thresh_bl: 6, thresh_global: 8, max_dev: 1000}}
+      dask: {scheduler: threads, workers: 6, threads: 6}
+    delay_imaging: {niter: 25000, save_sources: true}
+    peeling:
+      modelling: {crystalball: -po}
+      gains:
+        terms: [G, dE]
+        iter_recipe: [25,25,10,10]
+        G: {type: diag_complex, time_int: 60s, freq_int: 10}
+        dE: {type: complex, dd: true, time_int: 60, freq_int: 60}
+        column: SUBDD_DATA_bright_ext_q
+      imaging: {niter: 50000, column: SUBDD_DATA_bright_ext_q}
+
+regions:
+  G71+28: ds9.reg
