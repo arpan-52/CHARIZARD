@@ -2,7 +2,10 @@
 """
 Configuration parser for Charizard pipeline.
 
-Parses pokedex.yaml and returns PipelineConfig.
+Parses:
+- pokedex.yaml (main config)
+- models.yaml (optional user polcal models)
+
 Keeps raw flow dict - charizard.py reads it directly.
 """
 
@@ -35,14 +38,18 @@ class PipelineConfig:
     auto_detect: bool = True
     calibrator_overrides: Dict[str, Any] = field(default_factory=dict)
     uvrange_overrides: Dict[str, str] = field(default_factory=dict)
+    
+    # User models (from models.yaml)
+    user_models: Dict[str, Any] = field(default_factory=dict)
 
 
-def parse_config(pokedex_path: str) -> PipelineConfig:
+def parse_config(pokedex_path: str, models_path: Optional[str] = None) -> PipelineConfig:
     """
-    Parse pokedex.yaml and return PipelineConfig.
+    Parse pokedex.yaml and optional models.yaml, return PipelineConfig.
     
     Args:
         pokedex_path: Path to pokedex config file
+        models_path: Optional path to user models file
     
     Returns:
         PipelineConfig with all settings
@@ -88,6 +95,12 @@ def parse_config(pokedex_path: str) -> PipelineConfig:
     calibrator_overrides = overrides.get('calibrators', {})
     uvrange_overrides = overrides.get('uvranges', {})
     
+    # Load user models if provided
+    user_models = {}
+    if models_path and os.path.exists(models_path):
+        with open(models_path, 'r') as f:
+            user_models = yaml.safe_load(f) or {}
+    
     return PipelineConfig(
         # Paths
         ms_path=ms_path,
@@ -108,4 +121,7 @@ def parse_config(pokedex_path: str) -> PipelineConfig:
         auto_detect=sources.get('auto_detect', True),
         calibrator_overrides=calibrator_overrides,
         uvrange_overrides=uvrange_overrides,
+        
+        # User models
+        user_models=user_models,
     )

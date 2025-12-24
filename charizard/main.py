@@ -7,7 +7,6 @@ Entry point - parse args, define whitelist, call charizard()
 
 import argparse
 import sys
-from datetime import datetime
 
 from .charizard import charizard
 from .utils.general.config_parser import parse_config
@@ -111,6 +110,11 @@ def parse_args():
         help="Scheduler config file for housekeeper (YAML)"
     )
     
+    parser.add_argument(
+        "--models", "-m",
+        help="User models file with custom polcal models (YAML)"
+    )
+    
     return parser.parse_args()
 
 
@@ -118,17 +122,20 @@ def main():
     """Main entry point"""
     args = parse_args()
     
-    # Parse config
-    config = parse_config(args.config)
+    # Parse config (with optional user models)
+    config = parse_config(args.config, models_path=args.models)
     
     # Setup logger
-    logger = PipelineLogger(config.working_dir, config.ms_name)
+    logger = PipelineLogger(config.working_dir)
     logger.banner("CHARIZARD PIPELINE")
     
     logger.info(f"Config: {args.config}")
+    if args.scheduler_config:
+        logger.info(f"Scheduler config: {args.scheduler_config}")
+    if args.models:
+        logger.info(f"User models: {args.models}")
     logger.info(f"MS: {config.ms_path}")
     logger.info(f"Working directory: {config.working_dir}")
-    logger.info(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Scheduler config
     scheduler_config = args.scheduler_config
@@ -145,8 +152,9 @@ def main():
         traceback.print_exc()
         success = False
     
-    # Summary
+    # Summary and save
     logger.print_summary()
+    logger.save()
     
     sys.exit(0 if success else 1)
 
