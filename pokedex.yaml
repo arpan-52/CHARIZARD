@@ -26,11 +26,11 @@ sources:
 flow:
   initial_calibration_flagging:
     setup: {initialize: true, make_structure: true, brotherhood: true}
-    flagging: {bad_antennas: {auto: true, list: []}, rfi: true}
+    flagging: {bad_antennas: {auto: true, list: []}, rfi: true, use_gpu: true}
     calibration:
       refant: C00
       pol: {leakage: {mode: Df}, angle: true}
-      control: {check_solutions: true, flag_before: true, flag_after: true}
+      control: {check_solutions: true}
       apply: {targets: true, calibrators: true}
 
   imaging_selfcal:

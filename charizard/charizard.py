@@ -2,13 +2,23 @@
 """
 CHARIZARD - The Orchestrator
 
-Calls utility functions in order, handles flow control.
-Each util function does: write scripts, submit jobs, wait, return results.
-This file just orchestrates and handles brotherhood logic.
+Pipeline is HARDCODED. Config only provides settings.
+
+Flow:
+1. Analyze MS, build calibration plan
+2. Split (cal.ms, src.ms)
+3. Bad antenna detection + find best refant
+4. Initial flagging (apply badants.txt)
+5. RFI flagging on calibrators (catboss)
+6. Calibration round 1 + Source flagging (parallel)
+7. Post-cal flagging (catboss + nami)
+8. Calibration round 2
+9. Apply to both, final flagging
 """
 
 import os
-from typing import List, Optional
+import time
+from typing import List, Optional, Dict
 
 from housekeeper import Housekeeper
 
@@ -16,21 +26,32 @@ from .utils.general.ms_utils import get_ms_info
 from .utils.general.source_utils import build_calibration_plan
 from .utils.general.tracker import JobTracker
 from .utils.splitting_utils.splitter import run_split
+from .utils.flagging_utils.antenna_analysis import run_antenna_analysis
+from .utils.flagging_utils.initial_flagger import run_initial_flagging
+from .utils.flagging_utils.catboss import run_catboss
+from .utils.flagging_utils.nami import run_nami
+from .utils.flagging_utils.flag_commands import write_flag_commands
+from .utils.calibration_utils.gains import run_calibration
+from .utils.calibration_utils.applycal import run_applycal
 
 
-def charizard(config, logger, scheduler_config: Optional[str] = None, 
+def charizard(config, logger, scheduler_config: Optional[str] = None,
               whitelist: List[str] = None) -> bool:
     """
-    Run the pipeline.
+    Run the full calibration pipeline.
     
-    Args:
-        config: PipelineConfig from config_parser
-        logger: PipelineLogger
-        scheduler_config: Path to scheduler config for housekeeper
-        whitelist: Error patterns to ignore in log checking
-    
-    Returns:
-        True if successful
+    Config structure expected:
+    ```yaml
+    flow:
+      initial_calibration_flagging:
+        setup: {initialize: true, make_structure: true, brotherhood: true}
+        flagging: {bad_antennas: {auto: true, list: []}, rfi: true, use_gpu: true}
+        calibration:
+          refant: C00
+          pol: {leakage: {mode: Df}, angle: true}
+          control: {check_solutions: true}
+          apply: {targets: true, calibrators: true}
+    ```
     """
     whitelist = whitelist or []
     
@@ -38,22 +59,26 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     hk = Housekeeper(
         config=scheduler_config,
         jobs_dir=os.path.join(config.working_dir, "jobs"),
-        scheduler=config.environment['scheduler']
+        scheduler=config.environment.get('scheduler', 'pbs')
     )
     
-    # Get flow config
+    # Get settings from config
     flow = config.flow
     init_cal = flow.get('initial_calibration_flagging', {})
     setup = init_cal.get('setup', {})
-    # flagging = init_cal.get('flagging', {})
-    # calibration = init_cal.get('calibration', {})
+    flagging = init_cal.get('flagging', {})
+    calibration = init_cal.get('calibration', {})
     
     brotherhood = setup.get('brotherhood', True)
+    use_gpu = flagging.get('use_gpu', False)
+    user_refant = calibration.get('refant')
+    bad_ant_config = flagging.get('bad_antennas', {})
+    user_bad_ants = bad_ant_config.get('list', [])
     
     # =========================================================================
-    # ANALYZE MS
+    # STEP 1: ANALYZE MS
     # =========================================================================
-    logger.step("Analyzing MS")
+    logger.step("ANALYZING MS")
     
     ms_info = get_ms_info(config.ms_path)
     
@@ -64,7 +89,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.info(f"Antennas: {ms_info['num_antennas']}")
     logger.info(f"Central freq: {ms_info['central_freq_hz']/1e9:.3f} GHz")
     
-    # Build calibration plan (auto-detect + user overrides)
+    # Build calibration plan
     cal_plan = build_calibration_plan(ms_info, config, logger)
     
     logger.info(f"Flux cal: {cal_plan['flux_cal']}")
@@ -74,63 +99,366 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     if cal_plan.get('polangle_cal'):
         logger.info(f"Pol angle cal: {cal_plan['polangle_cal']}")
     logger.info(f"Targets: {', '.join(cal_plan['targets']) if cal_plan['targets'] else 'None'}")
+    logger.info(f"All calibrators: {cal_plan['all_calibrators']}")
+    
+    # Check if polcal possible
+    do_polcal = (cal_plan.get('leakage_cal') and 
+                 cal_plan.get('polangle_cal') and 
+                 cal_plan.get('polangle_cal') in cal_plan.get('polcal_models', {}))
+    
+    if do_polcal:
+        logger.info("Full polarization calibration enabled")
     
     # Initialize tracker
     tracker = JobTracker(config.target_spws, logger)
     
     # =========================================================================
-    # SPLIT
+    # STEP 2: SPLIT
     # =========================================================================
-    if setup.get('make_structure', True):
-        logger.step("SPLITTING")
-        
-        success = run_split(
+    logger.step("SPLITTING")
+    
+    success = run_split(
+        hk=hk,
+        config=config,
+        ms_info=ms_info,
+        cal_plan=cal_plan,
+        tracker=tracker,
+        logger=logger,
+        whitelist=whitelist
+    )
+    
+    if not success:
+        if brotherhood:
+            logger.error("Split failed - brotherhood enabled, stopping")
+            return False
+        logger.warning("Split had failures, continuing with remaining SPWs")
+    
+    active_spws = tracker.get_active_spws()
+    if not active_spws:
+        logger.error("No active SPWs!")
+        return False
+    
+    logger.success(f"Split complete. Active SPWs: {active_spws}")
+    
+    # =========================================================================
+    # STEP 3: BAD ANTENNA DETECTION + REFANT
+    # =========================================================================
+    logger.step("BAD ANTENNA DETECTION")
+    
+    active_spws, detected_refant = run_antenna_analysis(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        ms_info=ms_info,
+        logger=logger,
+        whitelist=whitelist
+    )
+    
+    if active_spws is None:
+        logger.error("Antenna analysis failed")
+        return False
+    
+    # Use user refant if specified, otherwise detected
+    refant = user_refant if user_refant else detected_refant
+    if not refant:
+        refant = ms_info['antennas'][0]
+        logger.warning(f"No refant, using first antenna: {refant}")
+    
+    logger.success(f"Refant: {refant}")
+    cal_plan['refant'] = refant
+    
+    # Write source flag commands
+    for spw in active_spws:
+        write_flag_commands(
+            f"{spw}/source_flags.txt",
+            mode='w',
+            flags_to_include=['autocorr', 'clip', 'quack'],
+            quack_interval=10
+        )
+    
+    # =========================================================================
+    # STEP 4: INITIAL FLAGGING
+    # =========================================================================
+    logger.step("INITIAL FLAGGING")
+    
+    # Apply badants.txt to cal.ms
+    active_spws = run_initial_flagging(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        ms_names=['cal.ms'],
+        flag_file='badants.txt',
+        logger=logger,
+        whitelist=whitelist,
+        prefix='cal'
+    )
+    
+    if active_spws is None:
+        if brotherhood:
+            return False
+    
+    # Apply source_flags.txt to src.ms
+    if cal_plan['targets']:
+        run_initial_flagging(
             hk=hk,
             config=config,
-            ms_info=ms_info,
+            active_spws=active_spws,
+            ms_names=['src.ms'],
+            flag_file='source_flags.txt',
+            logger=logger,
+            whitelist=whitelist,
+            prefix='src'
+        )
+    
+    logger.success("Initial flagging complete")
+    
+    # =========================================================================
+    # STEP 5: RFI FLAGGING ON CALIBRATORS
+    # =========================================================================
+    logger.step("RFI FLAGGING - CALIBRATORS")
+    
+    active_spws = run_catboss(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        ms_names=['cal.ms'],
+        stage='initial',
+        datacolumn='DATA',
+        logger=logger,
+        whitelist=whitelist,
+        wait=True,
+        prefix='cal'
+    )
+    
+    if active_spws is None:
+        if brotherhood:
+            return False
+    
+    logger.success("RFI flagging complete")
+    
+    # =========================================================================
+    # STEP 6: CALIBRATION ROUND 1 + SOURCE FLAGGING (PARALLEL)
+    # =========================================================================
+    logger.step("CALIBRATION ROUND 1")
+    
+    # Launch calibration (don't wait)
+    cal_job_ids = run_calibration(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        cal_plan=cal_plan,
+        refant=refant,
+        cal_round=1,
+        logger=logger,
+        whitelist=whitelist,
+        wait=False
+    )
+    
+    # Launch source flagging in parallel
+    src_flag_job_ids = []
+    if cal_plan['targets']:
+        logger.substep("Launching source flagging in parallel...")
+        src_flag_job_ids = run_catboss(
+            hk=hk,
+            config=config,
+            active_spws=active_spws,
+            ms_names=['src.ms'],
+            stage='initial',
+            datacolumn='DATA',
+            logger=logger,
+            whitelist=whitelist,
+            wait=False,
+            prefix='src'
+        )
+    
+    # Wait for calibration
+    logger.substep("Waiting for calibration round 1...")
+    if cal_job_ids:
+        results = hk.wait_and_check(cal_job_ids, whitelist=whitelist)
+        
+        successful = []
+        for job_id, (job, log_result) in results.items():
+            spw = job.job_subdir if hasattr(job, 'job_subdir') else 'unknown'
+            if log_result.success:
+                successful.append(spw)
+                logger.info(f"{spw}: Calibration OK")
+            else:
+                logger.error(f"{spw}: Calibration FAILED")
+        
+        if not successful and brotherhood:
+            return False
+        
+        active_spws = successful if successful else active_spws
+    
+    # Apply to calibrators
+    active_spws = run_applycal(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        cal_plan=cal_plan,
+        cal_round=1,
+        target_type='calibrators',
+        logger=logger,
+        whitelist=whitelist
+    )
+    
+    logger.success("Calibration round 1 complete")
+    
+    # =========================================================================
+    # STEP 7: POST-CAL FLAGGING
+    # =========================================================================
+    logger.step("POST-CAL FLAGGING")
+    
+    # Catboss on corrected data
+    run_catboss(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        ms_names=['cal.ms'],
+        stage='postcal',
+        datacolumn='CORRECTED_DATA',
+        logger=logger,
+        whitelist=whitelist,
+        prefix='postcal'
+    )
+    
+    # NAMI
+    run_nami(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        ms_names=['cal.ms'],
+        datacolumn='CORRECTED_DATA',
+        logger=logger,
+        whitelist=whitelist,
+        sigma=5.0,
+        prefix='postcal'
+    )
+    
+    logger.success("Post-cal flagging complete")
+    
+    # =========================================================================
+    # STEP 8: CALIBRATION ROUND 2
+    # =========================================================================
+    logger.step("CALIBRATION ROUND 2")
+    
+    active_spws = run_calibration(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        cal_plan=cal_plan,
+        refant=refant,
+        cal_round=2,
+        logger=logger,
+        whitelist=whitelist,
+        wait=True
+    )
+    
+    if active_spws is None:
+        if brotherhood:
+            return False
+    
+    # Apply to calibrators
+    run_applycal(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        cal_plan=cal_plan,
+        cal_round=2,
+        target_type='calibrators',
+        logger=logger,
+        whitelist=whitelist
+    )
+    
+    logger.success("Calibration round 2 complete")
+    
+    # =========================================================================
+    # STEP 9: APPLY TO TARGETS + CHECK SOURCE FLAGGING
+    # =========================================================================
+    if cal_plan['targets']:
+        logger.step("APPLY TO TARGETS")
+        
+        # Check if source flagging done
+        if src_flag_job_ids:
+            logger.substep("Checking source flagging status...")
+            hk.wait_and_check(src_flag_job_ids, whitelist=whitelist, timeout=300)
+        
+        # Apply calibration to targets
+        run_applycal(
+            hk=hk,
+            config=config,
+            active_spws=active_spws,
             cal_plan=cal_plan,
-            tracker=tracker,
+            cal_round=2,
+            target_type='targets',
             logger=logger,
             whitelist=whitelist
         )
         
-        if not success:
-            if brotherhood:
-                logger.error("Split failed - brotherhood enabled, stopping pipeline")
-                return False
-            else:
-                logger.warning("Split had failures, continuing with remaining SPWs")
+        logger.success("Applied to targets")
+    
+    # =========================================================================
+    # STEP 10: FINAL FLAGGING
+    # =========================================================================
+    logger.step("FINAL FLAGGING")
+    
+    # On cal.ms
+    run_catboss(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        ms_names=['cal.ms'],
+        stage='final',
+        datacolumn='CORRECTED_DATA',
+        logger=logger,
+        whitelist=whitelist,
+        prefix='final_cal'
+    )
+    
+    run_nami(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        ms_names=['cal.ms'],
+        datacolumn='CORRECTED_DATA',
+        logger=logger,
+        whitelist=whitelist,
+        sigma=4.5,
+        prefix='final_cal'
+    )
+    
+    # On src.ms
+    if cal_plan['targets']:
+        run_catboss(
+            hk=hk,
+            config=config,
+            active_spws=active_spws,
+            ms_names=['src.ms'],
+            stage='final',
+            datacolumn='CORRECTED_DATA',
+            logger=logger,
+            whitelist=whitelist,
+            prefix='final_src'
+        )
         
-        if not tracker.get_active_spws():
-            logger.error("No active SPWs remaining!")
-            return False
-        
-        logger.success(f"Split complete. Active SPWs: {tracker.get_active_spws()}")
+        run_nami(
+            hk=hk,
+            config=config,
+            active_spws=active_spws,
+            ms_names=['src.ms'],
+            datacolumn='CORRECTED_DATA',
+            logger=logger,
+            whitelist=whitelist,
+            sigma=4.5,
+            prefix='final_src'
+        )
+    
+    logger.success("Final flagging complete")
     
     # =========================================================================
-    # FUTURE STEPS (not implemented yet)
+    # DONE
     # =========================================================================
+    logger.success("PIPELINE COMPLETE!")
+    logger.info(f"Active SPWs: {active_spws}")
     
-    # if flagging.get('bad_antennas', {}).get('auto', True):
-    #     run_antenna_analysis(...)
-    
-    # if setup.get('initialize', True):
-    #     run_initial_flagging(...)
-    
-    # if flagging.get('rfi', True):
-    #     run_rfi_flagging(...)
-    
-    # run_calibration(...)
-    
-    # if calibration.get('apply', {}).get('calibrators', True):
-    #     run_applycal(..., 'calibrators')
-    
-    # if calibration.get('apply', {}).get('targets', True):
-    #     run_applycal(..., 'targets')
-    
-    # =========================================================================
-    # DONE (for now - only split implemented)
-    # =========================================================================
-    
-    logger.success("Pipeline completed (split stage)!")
     return True
