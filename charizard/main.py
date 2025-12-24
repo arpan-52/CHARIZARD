@@ -1,154 +1,155 @@
 #!/usr/bin/env python3
+# charizard/main.py
 """
-Charizard - Radio Interferometry Calibration Pipeline
-
-Usage:
-    charizard --config pokedex.yaml --scheduler_config scheduler.yaml
+CHARIZARD - Radio Interferometry Calibration Pipeline
+Entry point - parse args, define whitelist, call charizard()
 """
 
 import argparse
-import os
 import sys
-import yaml
 from datetime import datetime
 
-from housekeeper import Housekeeper
-
-from charizard.stager import run_stager
-from charizard.rfi_remover import run_rfi_removal
-from charizard.calibration import run_calibration
-from charizard.selfcal import run_selfcal
-from charizard.utils.logging import PipelineLogger
+from .charizard import charizard
+from .utils.general.config_parser import parse_config
+from .utils.general.logging import PipelineLogger
 
 
-def load_config(config_path):
-    """Load pipeline configuration from YAML"""
-    if not os.path.exists(config_path):
-        print(f"Error: Config file not found: {config_path}")
-        sys.exit(1)
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+# =============================================================================
+# ERROR WHITELIST - passed to housekeeper for log checking
+# =============================================================================
+
+ERROR_WHITELIST = [
+    # CASA harmless errors
+    "the only error message you will receive",
+    "prterun has exited",
+    "[TerminalIPythonApp] ERROR | Failed to create history session",
+    "sqlite3.OperationalError: database is locked",
+    "getcell::TIME   Exception Reported: TableProxy::getCell: no such row",
+    "TableProxy::getCell: no such row",
+    "Error '0:0' does not overlap",
+    "warnings.warn(errors[info][0], RuntimeWarning)",
+    "Leap second table TAI_UTC seems out-of-date",
+    "Until the table is updated (see the CASA documentation or your system admin)",
+    "times and coordinates derived from UTC could be wrong by 1s or more.",
+    
+    # QuartiCal/Numba warnings
+    "NumbaPendingDeprecationWarning",
+    "Code using Numba extension API maybe depending on 'old_style' error-capturing",
+    "which is deprecated and will be replaced by 'new_style'",
+    "See details at https://numba.readthedocs.io/en/latest/reference/deprecation.html",
+    "Exception origin:",
+    "if mode.literal_value == 4:",
+    
+    # CuPy warnings
+    "CuPy may not function correctly because multiple CuPy packages are installed",
+    "cupy, cupy-cuda12x",
+    "Follow these steps to resolve this issue:",
+    "pip uninstall <package_name>",
+    "conda uninstall cupy",
+    "Install the appropriate CuPy package",
+    "Refer to the Installation Guide for detailed instructions",
+    "https://docs.cupy.dev/en/stable/install.html",
+    
+    # CASA warnings
+    "WARN",
+    "WARNING",
+    "FutureWarning",
+    "DeprecationWarning",
+    "UserWarning",
+    "RuntimeWarning",
+    "PendingDeprecationWarning",
+    
+    # Common HPC/cluster warnings
+    "module load",
+    "module: command not found",
+    "PBS: job killed: walltime",
+    "slurmstepd: error: Exceeded job memory limit",
+    "mpirun: command not found",
+    "which: no mpirun in",
+    
+    # Python/package warnings
+    "site-packages",
+    "/usr/lib/python",
+    "import warnings",
+    "warnings.filterwarnings",
+    "FutureWarning: Passing",
+    
+    # Foresight warnings
+    "No sources found in catalog",
+    "Empty source list",
+    "Warning: Low S/N sources",
+    
+    # CrystalBall warnings  
+    "Warning: Model component",
+    "No MODEL_DATA column found",
+    "Creating MODEL_DATA column",
+    
+    # General computation warnings
+    "divide by zero encountered",
+    "invalid value encountered",
+    "overflow encountered",
+    "underflow encountered",
+    "NaN values detected",
+    "Empty array passed",
+]
+
+
+def parse_args():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description="CHARIZARD - Radio Interferometry Calibration Pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument(
+        "config",
+        help="Pokedex config file (YAML)"
+    )
+    
+    parser.add_argument(
+        "--scheduler_config", "-s",
+        help="Scheduler config file for housekeeper (YAML)"
+    )
+    
+    return parser.parse_args()
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Charizard - Radio Interferometry Calibration Pipeline',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-    charizard --config pokedex.yaml --scheduler_config scheduler.yaml
-    charizard --config pokedex.yaml --scheduler_config scheduler.yaml --start-from calibration
-        """
-    )
-    parser.add_argument('--config', '-c', required=True, 
-                        help='Path to pokedex.yaml pipeline config')
-    parser.add_argument('--scheduler_config', '-s', required=True,
-                        help='Path to scheduler_config.yaml for housekeeper')
-    parser.add_argument('--models', '-m', default=None,
-                        help='Path to user models.yaml (optional)')
-    parser.add_argument('--start-from', choices=['stager', 'flagging', 'calibration', 'selfcal'],
-                        default='stager', help='Start from specific stage')
-    parser.add_argument('--stop-after', choices=['stager', 'flagging', 'calibration', 'selfcal'],
-                        default='selfcal', help='Stop after specific stage')
-    parser.add_argument('--jobs-dir', default=None,
-                        help='Directory for job files (default: <ms_name>_processing)')
+    """Main entry point"""
+    args = parse_args()
     
-    args = parser.parse_args()
-
-    # Load configs
-    config = load_config(args.config)
+    # Parse config
+    config = parse_config(args.config)
     
-    # Determine jobs directory
-    ms_name = config['data']['ms']
-    ms_basename = os.path.basename(ms_name).replace('.ms', '')
-    jobs_dir = args.jobs_dir or f"./{ms_basename}_jobs"
-    
-    # Initialize housekeeper with scheduler config
-    hk = Housekeeper(config=args.scheduler_config, jobs_dir=jobs_dir)
-    
-    # Initialize logger
-    logger = PipelineLogger(jobs_dir)
-    
+    # Setup logger
+    logger = PipelineLogger(config.working_dir, config.ms_name)
     logger.banner("CHARIZARD PIPELINE")
-    logger.info(f"Pipeline config: {args.config}")
-    logger.info(f"Scheduler config: {args.scheduler_config}")
-    logger.info(f"MS: {ms_name}")
-    logger.info(f"Jobs directory: {jobs_dir}")
+    
+    logger.info(f"Config: {args.config}")
+    logger.info(f"MS: {config.ms_path}")
+    logger.info(f"Working directory: {config.working_dir}")
     logger.info(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-    stages = ['stager', 'flagging', 'calibration', 'selfcal']
-    start_idx = stages.index(args.start_from)
-    stop_idx = stages.index(args.stop_after)
-
-    cal_plan = None
-    active_spws = None
-
+    
+    # Scheduler config
+    scheduler_config = args.scheduler_config
+    
+    # Run pipeline
     try:
-        # ===== STAGER =====
-        if start_idx <= 0 <= stop_idx:
-            result = run_stager(hk, config, logger, user_models_path=args.models)
-            if not result['success']:
-                logger.error(f"Stager failed: {result.get('error', 'Unknown')}")
-                logger.save()
-                sys.exit(1)
-            cal_plan = result['cal_plan']
-            active_spws = result['active_spws']
-
-        # ===== FLAGGING =====
-        if start_idx <= 1 <= stop_idx:
-            if cal_plan is None:
-                logger.error("No calibration plan - run stager first")
-                sys.exit(1)
-            result = run_rfi_removal(hk, config, cal_plan, active_spws, logger)
-            if not result['success']:
-                logger.error(f"Flagging failed: {result.get('error', 'Unknown')}")
-                logger.save()
-                sys.exit(1)
-            # Update cal_plan with refant if found
-            if 'refant' in result:
-                cal_plan['refant'] = result['refant']
-
-        # ===== CALIBRATION =====
-        if start_idx <= 2 <= stop_idx:
-            if cal_plan is None:
-                logger.error("No calibration plan - run stager first")
-                sys.exit(1)
-            result = run_calibration(hk, config, cal_plan, active_spws, logger)
-            if not result['success']:
-                logger.error(f"Calibration failed: {result.get('error', 'Unknown')}")
-                logger.save()
-                sys.exit(1)
-
-        # ===== SELFCAL =====
-        if start_idx <= 3 <= stop_idx:
-            if cal_plan is None:
-                logger.error("No calibration plan - run stager first")
-                sys.exit(1)
-            result = run_selfcal(hk, config, cal_plan, active_spws, logger)
-            if not result['success']:
-                logger.error(f"Selfcal failed: {result.get('error', 'Unknown')}")
-                logger.save()
-                sys.exit(1)
-
-        # ===== DONE =====
-        logger.print_summary()
-        logger.save()
-
-        logger.banner("PIPELINE COMPLETED SUCCESSFULLY", style="success")
-
+        success = charizard(config, logger, scheduler_config, whitelist=ERROR_WHITELIST)
     except KeyboardInterrupt:
         logger.warning("Pipeline interrupted by user")
-        hk.cancel_all()
-        logger.save()
-        sys.exit(130)
-
+        success = False
     except Exception as e:
-        logger.error(f"Pipeline error: {e}")
+        logger.error(f"Pipeline failed: {e}")
         import traceback
         traceback.print_exc()
-        logger.save()
-        sys.exit(1)
+        success = False
+    
+    # Summary
+    logger.print_summary()
+    
+    sys.exit(0 if success else 1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

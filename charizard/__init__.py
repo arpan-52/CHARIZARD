@@ -1,6 +1,10 @@
 # charizard/__init__.py
 """
-Charizard - Radio Interferometry Calibration Pipeline
+CHARIZARD - Radio Interferometry Calibration Pipeline
 """
 
+from .charizard import charizard
+from .main import main
+
 __version__ = "2.0.0"
+__all__ = ['charizard', 'main']
