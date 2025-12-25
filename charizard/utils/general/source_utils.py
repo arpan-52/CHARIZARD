@@ -168,11 +168,31 @@ class CalibratorMatcher:
         return None
     
     def get_user_polcal_model(self, source_name: str) -> Optional[Dict]:
-        """Get polcal model from user models by name"""
+        """Get polcal model from user models by name.
+        
+        Checks multiple possible locations in user models:
+        - full_stokes.<source_name>
+        - polcal_models.<source_name>
+        - <source_name> directly
+        """
         if not self.user_models:
             return None
+        
+        # Try full_stokes first
         full_stokes = self.user_models.get('full_stokes', {})
-        return full_stokes.get(source_name)
+        if source_name in full_stokes:
+            return full_stokes[source_name]
+        
+        # Try polcal_models
+        polcal_models = self.user_models.get('polcal_models', {})
+        if source_name in polcal_models:
+            return polcal_models[source_name]
+        
+        # Try direct
+        if source_name in self.user_models:
+            return self.user_models[source_name]
+        
+        return None
 
 
 def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:

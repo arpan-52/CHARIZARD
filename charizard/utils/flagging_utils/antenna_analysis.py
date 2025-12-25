@@ -16,7 +16,7 @@ from multiprocessing import Pool
 from casacore import tables
 
 
-def get_ms_info(ms_path: str):
+def get_ms_info_for_antenna(ms_path: str):
     """Get basic MS info for antenna analysis."""
     with tables.table(ms_path, ack=False) as tb:
         scans = np.unique(tb.getcol('SCAN_NUMBER'))
@@ -180,22 +180,12 @@ def process_spw_field(params):
 
 
 def find_dead_antennas(ms_path: str, output_file: str, n_processes: int = None):
-    """
-    Find dead/bad antennas in MS and write to badants.txt.
-    
-    Args:
-        ms_path: Path to measurement set
-        output_file: Path to output file (badants.txt)
-        n_processes: Number of parallel processes
-    
-    Returns:
-        List of results from all SPW/field combinations
-    """
+    """Find dead/bad antennas and write to file."""
     if n_processes is None:
         n_processes = max(1, 12)
     
     print("Reading MS metadata...")
-    scans, fields, spws, ant_names, nchan, mock_ants = get_ms_info(ms_path)
+    scans, fields, spws, ant_names, nchan, mock_ants = get_ms_info_for_antenna(ms_path)
     
     tasks = [(ms_path, spw, field, ant_names, mock_ants) 
              for field in fields 
@@ -233,25 +223,13 @@ def find_dead_antennas(ms_path: str, output_file: str, n_processes: int = None):
 
 
 def find_best_refant(ms_path: str, n_processes: int = None) -> Tuple[str, Dict]:
-    """
-    Find the best reference antenna based on SNR metric.
-    
-    Best refant = highest (median_amp / std_amp) * (1 - flag_fraction)
-    
-    Args:
-        ms_path: Path to measurement set
-        n_processes: Number of parallel processes
-    
-    Returns:
-        (best_refant_name, antenna_stats_dict)
-    """
+    """Find the best reference antenna based on SNR metric."""
     if n_processes is None:
         n_processes = max(1, 8)
     
     print("Finding best reference antenna...")
-    scans, fields, spws, ant_names, nchan, mock_ants = get_ms_info(ms_path)
+    scans, fields, spws, ant_names, nchan, mock_ants = get_ms_info_for_antenna(ms_path)
     
-    # Collect antenna statistics
     ant_stats = defaultdict(lambda: {
         'valid_amplitudes': [],
         'total_samples': 0,
@@ -259,7 +237,6 @@ def find_best_refant(ms_path: str, n_processes: int = None) -> Tuple[str, Dict]:
     })
     
     with tables.table(ms_path, ack=False) as tb:
-        # Sample subset for speed
         nrows = min(tb.nrows(), 100000)
         ant1 = tb.getcol('ANTENNA1', 0, nrows)
         ant2 = tb.getcol('ANTENNA2', 0, nrows)
@@ -292,7 +269,6 @@ def find_best_refant(ms_path: str, n_processes: int = None) -> Tuple[str, Dict]:
                 if np.any(valid_mask):
                     ant_stats[ant]['valid_amplitudes'].extend(amp.tolist())
     
-    # Calculate SNR metric for each antenna
     refant_scores = {}
     for ant_idx, stats in ant_stats.items():
         if ant_idx in mock_ants:
@@ -309,8 +285,6 @@ def find_best_refant(ms_path: str, n_processes: int = None) -> Tuple[str, Dict]:
             continue
         
         flag_fraction = stats['flagged_samples'] / stats['total_samples'] if stats['total_samples'] > 0 else 1.0
-        
-        # SNR metric: (median/std) * (1 - flag_fraction)
         snr_metric = (median_amp / std_amp) * (1 - flag_fraction)
         
         refant_scores[ant_names[ant_idx]] = {
@@ -320,7 +294,6 @@ def find_best_refant(ms_path: str, n_processes: int = None) -> Tuple[str, Dict]:
             'flag_fraction': float(flag_fraction)
         }
     
-    # Find best
     if not refant_scores:
         print("WARNING: Could not determine best refant, using first antenna")
         return ant_names[0], {}
@@ -336,25 +309,9 @@ def run_antenna_analysis(hk, config, active_spws: List[str], ms_info: Dict,
     """
     Run antenna analysis step.
     
-    1. Find dead antennas
-    2. Find best refant
-    3. Write flag commands
-    
-    Args:
-        hk: Housekeeper instance
-        config: PipelineConfig
-        active_spws: List of active SPW directories
-        ms_info: MS info dict
-        logger: Logger
-        whitelist: Error whitelist
-    
-    Returns:
-        (active_spws, best_refant) or (None, None) on failure
+    Creates self-contained Python scripts that don't depend on charizard imports.
     """
-    import time
     from .flag_commands import write_flag_commands
-    
-    logger.step("BAD ANTENNA DETECTION")
     
     env = config.environment
     flow = config.flow
@@ -374,51 +331,267 @@ def run_antenna_analysis(hk, config, active_spws: List[str], ms_info: Dict,
     job_map = {}
     
     for spw in active_spws:
-        script = f'''
-import sys
-sys.path.insert(0, '.')
+        # Self-contained script - no charizard imports!
+        script = f'''#!/usr/bin/env python3
+# Antenna analysis for {spw}
+# Self-contained - no external imports
 
-from charizard.utils.flagging_utils.antenna_analysis import find_dead_antennas, find_best_refant
-from charizard.utils.flagging_utils.flag_commands import write_flag_commands
-import json
 import os
+import json
+import numpy as np
+from collections import defaultdict
+from multiprocessing import Pool
+from casacore import tables
 
 ms_path = '{spw}/cal.ms'
 badants_file = '{spw}/badants.txt'
 refant_file = '{spw}/refant.json'
+n_processes = {ppn}
+user_bad_ants = {repr(user_bad_ants)}
 
-# Find dead antennas
-find_dead_antennas(ms_path, badants_file, n_processes={ppn})
+print(f"Analyzing {{ms_path}}...")
+
+# ============================================================================
+# GET MS INFO
+# ============================================================================
+def get_ms_info_local(ms_path):
+    with tables.table(ms_path, ack=False) as tb:
+        scans = np.unique(tb.getcol('SCAN_NUMBER'))
+        fields = np.unique(tb.getcol('FIELD_ID'))
+        spws = np.unique(tb.getcol('DATA_DESC_ID'))
+        ant1 = tb.getcol('ANTENNA1', 0, min(10000, tb.nrows()))
+        ant2 = tb.getcol('ANTENNA2', 0, min(10000, tb.nrows()))
+        active_ants = np.unique(np.concatenate([ant1, ant2]))
+    
+    with tables.table(ms_path + '/ANTENNA', ack=False) as tb:
+        ant_names = list(tb.getcol('NAME'))
+        mock_mask = np.ones(len(ant_names), dtype=bool)
+        mock_mask[active_ants] = False
+        mock_ants = np.where(mock_mask)[0]
+    
+    with tables.table(ms_path + '/SPECTRAL_WINDOW', ack=False) as tb:
+        nchan = tb.getcol('NUM_CHAN')
+    
+    return scans, fields, spws, ant_names, nchan, mock_ants
+
+# ============================================================================
+# PROCESS SPW/FIELD
+# ============================================================================
+def process_spw_field(params):
+    ms_path, spw, field, ant_names, mock_ants = params
+    try:
+        with tables.table(ms_path, ack=False) as tb:
+            sel = tb.query(f"DATA_DESC_ID = {{spw}} AND FIELD_ID = {{field}}", sortlist='SCAN_NUMBER')
+            if sel.nrows() == 0:
+                return None
+            
+            scans = sel.getcol('SCAN_NUMBER')
+            ant1 = sel.getcol('ANTENNA1')
+            ant2 = sel.getcol('ANTENNA2')
+            data = sel.getcol('DATA')
+            flags = sel.getcol('FLAG')
+            
+            unique_scans = np.unique(scans)
+            num_ants = len(ant_names)
+            npols = data.shape[-1]
+            scan_bad_antennas = {{}}
+            
+            global_ant_stats = defaultdict(lambda: {{'valid_amplitudes': [], 'is_active': False}})
+            
+            for i in range(len(data)):
+                a1, a2 = ant1[i], ant2[i]
+                if npols == 4:
+                    pol_flags = flags[i, :, 0] | flags[i, :, 3]
+                elif npols == 2:
+                    pol_flags = flags[i, :, 0] | flags[i, :, 1]
+                else:
+                    pol_flags = flags[i, :, 0]
+                valid_mask = ~pol_flags
+                if np.any(valid_mask):
+                    if npols == 4:
+                        amp = (np.abs(data[i, valid_mask, 0]) + np.abs(data[i, valid_mask, 3])) / 2
+                    elif npols == 2:
+                        amp = (np.abs(data[i, valid_mask, 0]) + np.abs(data[i, valid_mask, 1])) / 2
+                    else:
+                        amp = np.abs(data[i, valid_mask, 0])
+                    for ant in [a1, a2]:
+                        global_ant_stats[ant]['is_active'] = True
+                        global_ant_stats[ant]['valid_amplitudes'].extend(amp.tolist())
+            
+            good_amps = []
+            for ant in range(num_ants):
+                stats = global_ant_stats[ant]
+                if stats['is_active'] and len(stats['valid_amplitudes']) > 0:
+                    med_amp = np.median(stats['valid_amplitudes'])
+                    if med_amp > 0:
+                        good_amps.append(med_amp)
+            
+            if not good_amps:
+                sel.close()
+                return None
+            
+            reference_amp = np.percentile(good_amps, 75)
+            threshold = reference_amp * 0.05
+            
+            for scan in unique_scans:
+                scan_mask = scans == scan
+                scan_indices = np.where(scan_mask)[0]
+                if len(scan_indices) == 0:
+                    continue
+                
+                scan_ant_stats = defaultdict(lambda: {{
+                    'total_samples': 0, 'flagged_samples': 0,
+                    'valid_amplitudes': [], 'is_active': False
+                }})
+                
+                for idx in scan_indices:
+                    a1, a2 = ant1[idx], ant2[idx]
+                    if npols == 4:
+                        pol_flags = flags[idx, :, 0] | flags[idx, :, 3]
+                    elif npols == 2:
+                        pol_flags = flags[idx, :, 0] | flags[idx, :, 1]
+                    else:
+                        pol_flags = flags[idx, :, 0]
+                    valid_mask = ~pol_flags
+                    if np.any(valid_mask):
+                        if npols == 4:
+                            amp = (np.abs(data[idx, valid_mask, 0]) + np.abs(data[idx, valid_mask, 3])) / 2
+                        elif npols == 2:
+                            amp = (np.abs(data[idx, valid_mask, 0]) + np.abs(data[idx, valid_mask, 1])) / 2
+                        else:
+                            amp = np.abs(data[idx, valid_mask, 0])
+                        for ant in [a1, a2]:
+                            scan_ant_stats[ant]['is_active'] = True
+                            scan_ant_stats[ant]['total_samples'] += len(valid_mask)
+                            scan_ant_stats[ant]['flagged_samples'] += np.sum(~valid_mask)
+                            scan_ant_stats[ant]['valid_amplitudes'].extend(amp.tolist())
+                
+                scan_bad_ants = []
+                for ant in range(num_ants):
+                    stats = scan_ant_stats[ant]
+                    if stats['is_active'] and len(stats['valid_amplitudes']) > 0 and ant not in mock_ants:
+                        flag_percent = stats['flagged_samples'] / stats['total_samples'] * 100 if stats['total_samples'] > 0 else 100
+                        if flag_percent > 90:
+                            continue
+                        med_amp = np.median(stats['valid_amplitudes'])
+                        if med_amp < threshold:
+                            scan_bad_ants.append({{'name': ant_names[ant], 'median_amplitude': float(med_amp)}})
+                
+                if scan_bad_ants:
+                    scan_bad_antennas[int(scan)] = scan_bad_ants
+            
+            sel.close()
+            return {{'field': int(field), 'spw': int(spw), 'scan_bad_antennas': scan_bad_antennas}}
+    except Exception as e:
+        print(f"Error: {{e}}")
+        return None
+
+# ============================================================================
+# MAIN
+# ============================================================================
+print("Reading MS metadata...")
+scans, fields, spws, ant_names, nchan, mock_ants = get_ms_info_local(ms_path)
+print(f"Found {{len(ant_names)}} antennas, {{len(fields)}} fields, {{len(spws)}} SPWs")
+
+tasks = [(ms_path, spw, field, ant_names, mock_ants) for field in fields for spw in spws]
+print(f"Processing {{len(tasks)}} combinations with {{n_processes}} processes...")
+
+with Pool(n_processes) as pool:
+    all_results = pool.map(process_spw_field, tasks)
+
+# Aggregate bad antennas
+antenna_scan_map = defaultdict(lambda: defaultdict(set))
+for result in all_results:
+    if result and result['scan_bad_antennas']:
+        field = result['field']
+        for scan, bad_ants in result['scan_bad_antennas'].items():
+            for ant_info in bad_ants:
+                antenna_scan_map[ant_info['name']][field].add(scan)
+
+# Write badants.txt
+with open(badants_file, 'w') as f:
+    for ant_name, field_scans in antenna_scan_map.items():
+        for field, scan_set in field_scans.items():
+            if scan_set:
+                scan_str = ','.join(map(str, sorted(list(scan_set))))
+                f.write(f"mode='manual' antenna='{{ant_name}}' field='{{field}}' scan='{{scan_str}}' reason='dead_antenna'\\n")
+    if antenna_scan_map:
+        f.write("mode='summary'\\n\\n")
+
+print(f"Bad antennas written to {{badants_file}}")
 
 # Find best refant
-best_refant, refant_scores = find_best_refant(ms_path, n_processes={ppn})
+print("Finding best reference antenna...")
+ant_stats = defaultdict(lambda: {{'valid_amplitudes': [], 'total_samples': 0, 'flagged_samples': 0}})
 
-# Save refant info
+with tables.table(ms_path, ack=False) as tb:
+    nrows = min(tb.nrows(), 100000)
+    ant1 = tb.getcol('ANTENNA1', 0, nrows)
+    ant2 = tb.getcol('ANTENNA2', 0, nrows)
+    data = tb.getcol('DATA', 0, nrows)
+    flags = tb.getcol('FLAG', 0, nrows)
+    npols = data.shape[-1]
+    
+    for i in range(len(data)):
+        a1, a2 = ant1[i], ant2[i]
+        if npols == 4:
+            pol_flags = flags[i, :, 0] | flags[i, :, 3]
+        elif npols == 2:
+            pol_flags = flags[i, :, 0] | flags[i, :, 1]
+        else:
+            pol_flags = flags[i, :, 0]
+        valid_mask = ~pol_flags
+        if np.any(valid_mask):
+            if npols == 4:
+                amp = (np.abs(data[i, valid_mask, 0]) + np.abs(data[i, valid_mask, 3])) / 2
+            elif npols == 2:
+                amp = (np.abs(data[i, valid_mask, 0]) + np.abs(data[i, valid_mask, 1])) / 2
+            else:
+                amp = np.abs(data[i, valid_mask, 0])
+            for ant in [a1, a2]:
+                ant_stats[ant]['total_samples'] += len(valid_mask)
+                ant_stats[ant]['flagged_samples'] += np.sum(~valid_mask)
+                ant_stats[ant]['valid_amplitudes'].extend(amp.tolist())
+
+refant_scores = {{}}
+for ant_idx, stats in ant_stats.items():
+    if ant_idx in mock_ants or len(stats['valid_amplitudes']) < 100:
+        continue
+    amps = np.array(stats['valid_amplitudes'])
+    median_amp = np.median(amps)
+    std_amp = np.std(amps)
+    if std_amp == 0:
+        continue
+    flag_fraction = stats['flagged_samples'] / stats['total_samples'] if stats['total_samples'] > 0 else 1.0
+    snr_metric = (median_amp / std_amp) * (1 - flag_fraction)
+    refant_scores[ant_names[ant_idx]] = {{'snr_metric': float(snr_metric), 'flag_fraction': float(flag_fraction)}}
+
+best_refant = ant_names[0]
+if refant_scores:
+    best_refant = max(refant_scores, key=lambda x: refant_scores[x]['snr_metric'])
+    print(f"Best refant: {{best_refant}} (SNR: {{refant_scores[best_refant]['snr_metric']:.3f}})")
+else:
+    print(f"Warning: Could not determine refant, using {{best_refant}}")
+
 with open(refant_file, 'w') as f:
     json.dump({{'best_refant': best_refant, 'scores': refant_scores}}, f, indent=2)
 
-# Get MS spec for edge flagging
-from casacore import tables
-with tables.table(ms_path + '/SPECTRAL_WINDOW', ack=False) as tb:
-    nchan = int(tb.getcol('NUM_CHAN')[0])
-    nspws = tb.nrows()
-
 # Append user bad antennas
-user_bad = {repr(user_bad_ants)}
-if user_bad:
+if user_bad_ants:
     with open(badants_file, 'a') as f:
-        f.write("\\n")
-        for ant in user_bad:
+        for ant in user_bad_ants:
             f.write(f"mode='manual' antenna='{{ant}}' reason='user_specified'\\n")
+    print(f"Added user bad antennas: {{user_bad_ants}}")
 
-# Append standard flag commands
-write_flag_commands(badants_file, mode='a',
-    flags_to_include=['quack', 'clip', 'autocorr'],
-    nchan=nchan, nspws=nspws, edge_percent=5,
-    quack_interval=10)
+# Append standard flags
+with open(badants_file, 'a') as f:
+    f.write("# Standard flags\\n")
+    f.write("mode='manual' autocorr=True reason='autocorr'\\n")
+    f.write("mode='clip' correlation='ABS_ALL' clipzeros=True reason='clip_zeros'\\n")
+    f.write("mode='quack' quackinterval=10 quackmode='beg' quackincrement=False reason='quackbeg'\\n")
+    f.write("mode='quack' quackinterval=10 quackmode='endb' quackincrement=False reason='quackend'\\n")
 
-print(f"Best refant: {{best_refant}}")
-print("Antenna analysis complete")
+print("Antenna analysis complete!")
 '''
         
         script_file = f"antenna_{spw}.py"
@@ -461,16 +634,33 @@ python3 {script_file}
     for job_id, (job, log_result) in results.items():
         spw = job_map.get(job_id, 'unknown')
         
+        # Find the job log file
+        job_log = None
+        for ext in ['.log', '.out', '.err']:
+            for pattern in [f"{spw}/antenna_{spw}{ext}", f"jobs/antenna_{spw}{ext}", f"antenna_{spw}{ext}"]:
+                if os.path.exists(pattern):
+                    job_log = pattern
+                    break
+            if job_log:
+                break
+        
         if not log_result.success:
             failed.append(spw)
-            logger.error(f"{spw}: FAILED")
+            if job_log:
+                logger.error(f"{spw}: FAILED - see log: {os.path.abspath(job_log)}")
+            else:
+                logger.error(f"{spw}: FAILED")
+            
+            # Show actual errors from log
+            if log_result.error_lines:
+                for err in log_result.error_lines[:5]:
+                    logger.error(f"  >> {err}")
             continue
         
         # Check outputs
         if os.path.exists(f"{spw}/badants.txt") and os.path.exists(f"{spw}/refant.json"):
             successful.append(spw)
             
-            # Read refant
             with open(f"{spw}/refant.json", 'r') as f:
                 refant_data = json.load(f)
                 refants.append(refant_data['best_refant'])
@@ -478,7 +668,16 @@ python3 {script_file}
             logger.info(f"{spw}: OK (refant: {refant_data['best_refant']})")
         else:
             failed.append(spw)
-            logger.error(f"{spw}: Missing output files")
+            missing = []
+            if not os.path.exists(f"{spw}/badants.txt"):
+                missing.append("badants.txt")
+            if not os.path.exists(f"{spw}/refant.json"):
+                missing.append("refant.json")
+            
+            if job_log:
+                logger.error(f"{spw}: Missing {missing} - see log: {os.path.abspath(job_log)}")
+            else:
+                logger.error(f"{spw}: Missing {missing}")
     
     if not successful:
         return None, None

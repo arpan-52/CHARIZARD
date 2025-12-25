@@ -88,6 +88,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.info(f"SPWs: {ms_info['num_spws']}, Channels/SPW: {ms_info['num_channels']}")
     logger.info(f"Antennas: {ms_info['num_antennas']}")
     logger.info(f"Central freq: {ms_info['central_freq_hz']/1e9:.3f} GHz")
+    logger.info(f"Correlations: {ms_info.get('corr_names', [])} ({ms_info.get('pol_basis', 'unknown')} basis)")
     
     # Build calibration plan
     cal_plan = build_calibration_plan(ms_info, config, logger)
@@ -108,6 +109,17 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     
     if do_polcal:
         logger.info("Full polarization calibration enabled")
+        logger.info("  -> Will split ALL correlations")
+    else:
+        logger.info("No polarization calibration")
+        if ms_info.get('num_corrs', 4) == 4:
+            basis = ms_info.get('pol_basis', 'unknown')
+            if basis == 'circular':
+                logger.info("  -> Will split only RR,LL (parallel hands)")
+            elif basis == 'linear':
+                logger.info("  -> Will split only XX,YY (parallel hands)")
+            else:
+                logger.info("  -> Will split all correlations (unknown basis)")
     
     # Initialize tracker
     tracker = JobTracker(config.target_spws, logger)
