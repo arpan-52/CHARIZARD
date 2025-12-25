@@ -6,14 +6,15 @@ Pipeline is HARDCODED. Config only provides settings.
 
 Flow:
 1. Analyze MS, build calibration plan
-2. Split (cal.ms, src.ms)
-3. Bad antenna detection + find best refant
+2. Split (cal.ms, src.ms) - parallel hands only if no polcal
+3. Bad antenna detection → writes badants.txt
 4. Initial flagging (apply badants.txt)
 5. RFI flagging on calibrators (catboss)
-6. Calibration round 1 + Source flagging (parallel)
-7. Post-cal flagging (catboss + nami)
-8. Calibration round 2
-9. Apply to both, final flagging
+6. Find best refant ← AFTER flagging for clean data
+7. Calibration round 1 + Source flagging (parallel)
+8. Post-cal flagging (catboss + nami)
+9. Calibration round 2
+10. Apply to both, final flagging
 """
 
 import os
@@ -26,7 +27,7 @@ from .utils.general.ms_utils import get_ms_info
 from .utils.general.source_utils import build_calibration_plan
 from .utils.general.tracker import JobTracker
 from .utils.splitting_utils.splitter import run_split
-from .utils.flagging_utils.antenna_analysis import run_antenna_analysis
+from .utils.flagging_utils.antenna_analysis import run_bad_antenna_detection, run_find_refant
 from .utils.flagging_utils.initial_flagger import run_initial_flagging
 from .utils.flagging_utils.catboss import run_catboss
 from .utils.flagging_utils.nami import run_nami
@@ -47,7 +48,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         setup: {initialize: true, make_structure: true, brotherhood: true}
         flagging: {bad_antennas: {auto: true, list: []}, rfi: true, use_gpu: true}
         calibration:
-          refant: C00
+          refant: C00  # optional, auto-detect if not set
           pol: {leakage: {mode: Df}, angle: true}
           control: {check_solutions: true}
           apply: {targets: true, calibrators: true}
@@ -70,10 +71,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     calibration = init_cal.get('calibration', {})
     
     brotherhood = setup.get('brotherhood', True)
-    use_gpu = flagging.get('use_gpu', False)
-    user_refant = calibration.get('refant')
-    bad_ant_config = flagging.get('bad_antennas', {})
-    user_bad_ants = bad_ant_config.get('list', [])
+    user_refant = calibration.get('refant')  # User can override refant
     
     # =========================================================================
     # STEP 1: ANALYZE MS
@@ -153,33 +151,25 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.success(f"Split complete. Active SPWs: {active_spws}")
     
     # =========================================================================
-    # STEP 3: BAD ANTENNA DETECTION + REFANT
+    # STEP 3: BAD ANTENNA DETECTION
     # =========================================================================
     logger.step("BAD ANTENNA DETECTION")
     
-    active_spws, detected_refant = run_antenna_analysis(
+    active_spws = run_bad_antenna_detection(
         hk=hk,
         config=config,
         active_spws=active_spws,
-        ms_info=ms_info,
         logger=logger,
         whitelist=whitelist
     )
     
     if active_spws is None:
-        logger.error("Antenna analysis failed")
+        logger.error("Bad antenna detection failed")
         return False
     
-    # Use user refant if specified, otherwise detected
-    refant = user_refant if user_refant else detected_refant
-    if not refant:
-        refant = ms_info['antennas'][0]
-        logger.warning(f"No refant, using first antenna: {refant}")
+    logger.success("Bad antenna detection complete")
     
-    logger.success(f"Refant: {refant}")
-    cal_plan['refant'] = refant
-    
-    # Write source flag commands
+    # Write source flag commands (for later)
     for spw in active_spws:
         write_flag_commands(
             f"{spw}/source_flags.txt",
@@ -225,7 +215,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.success("Initial flagging complete")
     
     # =========================================================================
-    # STEP 5: RFI FLAGGING ON CALIBRATORS
+    # STEP 5: RFI FLAGGING ON CALIBRATORS (catboss)
     # =========================================================================
     logger.step("RFI FLAGGING - CALIBRATORS")
     
@@ -249,7 +239,33 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.success("RFI flagging complete")
     
     # =========================================================================
-    # STEP 6: CALIBRATION ROUND 1 + SOURCE FLAGGING (PARALLEL)
+    # STEP 6: FIND BEST REFANT (after flagging!)
+    # =========================================================================
+    logger.step("FINDING BEST REFERENCE ANTENNA")
+    
+    if user_refant:
+        # User specified refant
+        refant = user_refant
+        logger.info(f"Using user-specified refant: {refant}")
+    else:
+        # Auto-detect refant on cleaned data
+        _, refant = run_find_refant(
+            hk=hk,
+            config=config,
+            active_spws=active_spws,
+            logger=logger,
+            whitelist=whitelist
+        )
+        
+        if not refant:
+            refant = ms_info['antennas'][0]
+            logger.warning(f"Could not determine refant, using first antenna: {refant}")
+    
+    cal_plan['refant'] = refant
+    logger.success(f"Refant: {refant}")
+    
+    # =========================================================================
+    # STEP 7: CALIBRATION ROUND 1 + SOURCE FLAGGING (PARALLEL)
     # =========================================================================
     logger.step("CALIBRATION ROUND 1")
     
@@ -296,6 +312,9 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                 logger.info(f"{spw}: Calibration OK")
             else:
                 logger.error(f"{spw}: Calibration FAILED")
+                if log_result.error_lines:
+                    for err in log_result.error_lines[:3]:
+                        logger.error(f"  >> {err}")
         
         if not successful and brotherhood:
             return False
@@ -317,7 +336,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.success("Calibration round 1 complete")
     
     # =========================================================================
-    # STEP 7: POST-CAL FLAGGING
+    # STEP 8: POST-CAL FLAGGING
     # =========================================================================
     logger.step("POST-CAL FLAGGING")
     
@@ -350,7 +369,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.success("Post-cal flagging complete")
     
     # =========================================================================
-    # STEP 8: CALIBRATION ROUND 2
+    # STEP 9: CALIBRATION ROUND 2
     # =========================================================================
     logger.step("CALIBRATION ROUND 2")
     
@@ -385,7 +404,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.success("Calibration round 2 complete")
     
     # =========================================================================
-    # STEP 9: APPLY TO TARGETS + CHECK SOURCE FLAGGING
+    # STEP 10: APPLY TO TARGETS + CHECK SOURCE FLAGGING
     # =========================================================================
     if cal_plan['targets']:
         logger.step("APPLY TO TARGETS")
@@ -410,7 +429,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         logger.success("Applied to targets")
     
     # =========================================================================
-    # STEP 10: FINAL FLAGGING
+    # STEP 11: FINAL FLAGGING
     # =========================================================================
     logger.step("FINAL FLAGGING")
     
