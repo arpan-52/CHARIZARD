@@ -13,6 +13,8 @@ from housekeeper import Housekeeper
 
 
 # Hardcoded catboss defaults
+# NEVER more than 4 combinations (1,2,4,8)
+# NEVER below 5 sigma
 CATBOSS_DEFAULTS = {
     'initial': {
         'combinations': '1,2',
@@ -29,8 +31,15 @@ CATBOSS_DEFAULTS = {
         'deviation_threshold': 3.0,
     },
     'final': {
-        'combinations': '1,2,4,8,16',
-        'sigma': 4.5,
+        'combinations': '1,2,4,8',
+        'sigma': 5.0,
+        'rho': 1.5,
+        'poly_degree': 5,
+        'deviation_threshold': 3.0,
+    },
+    'residual': {
+        'combinations': '1,2,4,8',
+        'sigma': 5.0,
         'rho': 1.5,
         'poly_degree': 5,
         'deviation_threshold': 3.0,

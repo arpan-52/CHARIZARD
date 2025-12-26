@@ -19,6 +19,13 @@ NAMI_DEFAULTS = {
     'timebin': 30.0,
 }
 
+# For selfcal residual flagging
+NAMI_SELFCAL_DEFAULTS = {
+    'sigma': 5.0,
+    'nknots': 3,
+    'timebin': 10.0,
+}
+
 
 def build_nami_command(ms_path: str,
                        datacolumn: str = 'CORRECTED_DATA',

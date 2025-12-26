@@ -454,7 +454,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         datacolumn='CORRECTED_DATA',
         logger=logger,
         whitelist=whitelist,
-        sigma=4.5,
+        sigma=5.0,
         prefix='final_cal'
     )
     
@@ -480,11 +480,145 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             datacolumn='CORRECTED_DATA',
             logger=logger,
             whitelist=whitelist,
-            sigma=4.5,
+            sigma=5.0,
             prefix='final_src'
         )
     
     logger.success("Final flagging complete")
+    
+    # =========================================================================
+    # STEP 12: IMAGING + SELF-CALIBRATION (if configured)
+    # =========================================================================
+    if flow.get('imaging_selfcal'):
+        from .utils.selfcal_utils.prepare import prepare_selfcal_ms
+        from .utils.selfcal_utils.imaging import run_dirty_image, run_wsclean
+        from .utils.selfcal_utils.selfcal import run_selfcal_loop
+        
+        logger.step("IMAGING AND SELF-CALIBRATION")
+        
+        selfcal_config = flow.get('imaging_selfcal', {}).get('selfcal', {})
+        loops_config = selfcal_config.get('loops', {})
+        setup_config = flow.get('imaging_selfcal', {}).get('setup', {})
+        
+        # Brotherhood for selfcal (separate from calibration brotherhood)
+        selfcal_brotherhood = setup_config.get('brotherhood', True)
+        
+        # Get refant - user specified or from calibration
+        selfcal_refant = loops_config.get('refant') or refant
+        logger.info(f"Using refant for selfcal: {selfcal_refant}")
+        logger.info(f"Selfcal brotherhood: {selfcal_brotherhood}")
+        
+        # Prepare MS (split per field, freq average)
+        freqbin = selfcal_config.get('freqbin', 10)
+        
+        ms_map = prepare_selfcal_ms(
+            hk=hk,
+            config=config,
+            active_spws=active_spws,
+            targets=cal_plan['targets'],
+            freqbin=freqbin,
+            logger=logger,
+            whitelist=whitelist
+        )
+        
+        if not ms_map:
+            logger.error("Failed to prepare MS for selfcal")
+            if not selfcal_brotherhood:
+                return False
+        else:
+            # Initial flagging on selfcal MS
+            if selfcal_config.get('avg_flag', True):
+                logger.substep("Initial flagging on selfcal MS...")
+                
+                env = config.environment
+                preamble = env.get('shell_preamble', '')
+                resources = config.resources.get('flagging', config.resources.get('default', {}))
+                ppn = resources.get('ppn', 8)
+                
+                flag_jobs = []
+                flag_job_map = {}
+                
+                for field, ms_list in ms_map.items():
+                    for ms_path in ms_list:
+                        spw = ms_path.split('/')[0]
+                        field_dir = f"{spw}/{field}"
+                        
+                        script = f'''#!/usr/bin/env python3
+import subprocess
+import os
+
+ms = '{ms_path}'
+
+# Catboss initial - sigma 6.0, combinations 1,2
+cmd = f"catboss --cat pooh {{ms}} --combinations 1,2 --sigma 6.0 --rho 1.5 --poly-degree 5 --deviation-threshold 3.0 --datacolumn DATA --apply-flags --max-threads {ppn} --max-memory-usage 0.8 --verbose"
+print(f"Running: {{cmd}}")
+subprocess.run(cmd, shell=True)
+
+# Remove lock
+lock_file = os.path.join(ms, 'table.lock')
+if os.path.exists(lock_file):
+    os.remove(lock_file)
+
+print("Initial flagging complete")
+'''
+                        script_file = f"scflag_{spw}_{field}.py"
+                        with open(script_file, 'w') as f:
+                            f.write(script)
+                        
+                        command = f"""cd {os.getcwd()}
+{preamble}
+python3 {script_file}
+"""
+                        job = hk.submit(
+                            command=command,
+                            name=f"scflag_{spw}_{field}",
+                            job_subdir=field_dir,
+                            ppn=ppn,
+                            walltime=resources.get('walltime', '02:00:00')
+                        )
+                        
+                        if job.job_id:
+                            flag_jobs.append(job.job_id)
+                            flag_job_map[job.job_id] = (field, spw)
+                        
+                        time.sleep(0.3)
+                
+                if flag_jobs:
+                    logger.substep(f"Waiting for {len(flag_jobs)} initial flagging jobs...")
+                    results = hk.wait_and_check(flag_jobs, whitelist=whitelist)
+                    
+                    for job_id, (job, log_result) in results.items():
+                        field, spw = flag_job_map.get(job_id, ('unknown', 'unknown'))
+                        if log_result.success:
+                            logger.info(f"{spw}/{field}: OK")
+                        else:
+                            logger.warning(f"{spw}/{field}: flagging issues")
+            
+            # Dirty image if requested
+            if flow.get('imaging_selfcal', {}).get('dirty_image', False):
+                logger.substep("Creating dirty images...")
+                run_dirty_image(
+                    hk=hk,
+                    config=config,
+                    ms_map=ms_map,
+                    logger=logger,
+                    whitelist=whitelist
+                )
+            
+            # Run selfcal loop
+            ms_map = run_selfcal_loop(
+                hk=hk,
+                config=config,
+                ms_map=ms_map,
+                refant=selfcal_refant,
+                logger=logger,
+                whitelist=whitelist
+            )
+            
+            if ms_map:
+                logger.success("Self-calibration complete!")
+            else:
+                logger.warning("Self-calibration had issues")
     
     # =========================================================================
     # DONE
