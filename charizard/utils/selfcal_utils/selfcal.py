@@ -151,7 +151,7 @@ bandpass(
     spw='',
     solint='inf',
     refant='{refant}',
-    minsnr=3.0,
+    minsnr=2.0,
     gaintable=['{caltable_g}'],
     solnorm={solnorm}
 )

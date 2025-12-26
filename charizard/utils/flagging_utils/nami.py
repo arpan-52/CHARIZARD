@@ -23,7 +23,7 @@ NAMI_DEFAULTS = {
 NAMI_SELFCAL_DEFAULTS = {
     'sigma': 5.0,
     'nknots': 3,
-    'timebin': 10.0,
+    'timebin': 30.0,
 }
 
 
