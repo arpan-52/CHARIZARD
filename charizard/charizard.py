@@ -1,6 +1,7 @@
 # charizard/charizard.py
 """
 CHARIZARD - The Orchestrator
+Arpan's style - be VOCAL about what's happening!
 
 Pipeline is HARDCODED. Config only provides settings.
 
@@ -15,6 +16,8 @@ Flow:
 8. Post-cal flagging (catboss + nami)
 9. Calibration round 2
 10. Apply to both, final flagging
+11. Diagnostic plots (if requested)
+12. Imaging + Self-calibration (if configured)
 """
 
 import os
@@ -41,20 +44,17 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     """
     Run the full calibration pipeline.
     
-    Config structure expected:
-    ```yaml
-    flow:
-      initial_calibration_flagging:
-        setup: {initialize: true, make_structure: true, brotherhood: true}
-        flagging: {bad_antennas: {auto: true, list: []}, rfi: true, use_gpu: true}
-        calibration:
-          refant: C00  # optional, auto-detect if not set
-          pol: {leakage: {mode: Df}, angle: true}
-          control: {check_solutions: true}
-          apply: {targets: true, calibrators: true}
-    ```
+    Returns True ONLY if ALL requested steps completed successfully.
     """
     whitelist = whitelist or []
+    
+    # Track pipeline status
+    pipeline_status = {
+        'completed_steps': [],
+        'failed_steps': [],
+        'warnings': [],
+        'all_steps_requested': [],
+    }
     
     # Setup housekeeper
     hk = Housekeeper(
@@ -69,9 +69,20 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     setup = init_cal.get('setup', {})
     flagging = init_cal.get('flagging', {})
     calibration = init_cal.get('calibration', {})
+    control = calibration.get('control', {})
     
     brotherhood = setup.get('brotherhood', True)
-    user_refant = calibration.get('refant')  # User can override refant
+    user_refant = calibration.get('refant')
+    do_plotting = control.get('plot', False)
+    
+    # Build list of requested steps
+    pipeline_status['all_steps_requested'] = ['analyze', 'split', 'badant', 'initial_flag', 
+                                               'rfi_flag', 'refant', 'cal1', 'postcal_flag',
+                                               'cal2', 'apply_targets', 'final_flag']
+    if do_plotting:
+        pipeline_status['all_steps_requested'].append('plotting')
+    if flow.get('imaging_selfcal'):
+        pipeline_status['all_steps_requested'].append('selfcal')
     
     # =========================================================================
     # STEP 1: ANALYZE MS
@@ -121,6 +132,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     
     # Initialize tracker
     tracker = JobTracker(config.target_spws, logger)
+    pipeline_status['completed_steps'].append('analyze')
     
     # =========================================================================
     # STEP 2: SPLIT
@@ -138,17 +150,21 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     )
     
     if not success:
+        pipeline_status['failed_steps'].append('split')
         if brotherhood:
             logger.error("Split failed - brotherhood enabled, stopping")
             return False
         logger.warning("Split had failures, continuing with remaining SPWs")
+        pipeline_status['warnings'].append("Split had partial failures")
     
     active_spws = tracker.get_active_spws()
     if not active_spws:
         logger.error("No active SPWs!")
+        pipeline_status['failed_steps'].append('split')
         return False
     
     logger.success(f"Split complete. Active SPWs: {active_spws}")
+    pipeline_status['completed_steps'].append('split')
     
     # =========================================================================
     # STEP 3: BAD ANTENNA DETECTION
@@ -164,10 +180,12 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     )
     
     if active_spws is None:
-        logger.error("Bad antenna detection failed")
+        logger.error("Bad antenna detection failed completely!")
+        pipeline_status['failed_steps'].append('badant')
         return False
     
     logger.success("Bad antenna detection complete")
+    pipeline_status['completed_steps'].append('badant')
     
     # Write source flag commands (for later)
     for spw in active_spws:
@@ -196,6 +214,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     )
     
     if active_spws is None:
+        pipeline_status['failed_steps'].append('initial_flag')
         if brotherhood:
             return False
     
@@ -213,6 +232,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         )
     
     logger.success("Initial flagging complete")
+    pipeline_status['completed_steps'].append('initial_flag')
     
     # =========================================================================
     # STEP 5: RFI FLAGGING ON CALIBRATORS (catboss)
@@ -233,10 +253,12 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     )
     
     if active_spws is None:
+        pipeline_status['failed_steps'].append('rfi_flag')
         if brotherhood:
             return False
     
     logger.success("RFI flagging complete")
+    pipeline_status['completed_steps'].append('rfi_flag')
     
     # =========================================================================
     # STEP 6: FIND BEST REFANT (after flagging!)
@@ -244,11 +266,9 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.step("FINDING BEST REFERENCE ANTENNA")
     
     if user_refant:
-        # User specified refant
         refant = user_refant
         logger.info(f"Using user-specified refant: {refant}")
     else:
-        # Auto-detect refant on cleaned data
         _, refant = run_find_refant(
             hk=hk,
             config=config,
@@ -260,9 +280,11 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         if not refant:
             refant = ms_info['antennas'][0]
             logger.warning(f"Could not determine refant, using first antenna: {refant}")
+            pipeline_status['warnings'].append(f"Refant auto-detection failed, using {refant}")
     
     cal_plan['refant'] = refant
     logger.success(f"Refant: {refant}")
+    pipeline_status['completed_steps'].append('refant')
     
     # =========================================================================
     # STEP 7: CALIBRATION ROUND 1 + SOURCE FLAGGING (PARALLEL)
@@ -298,6 +320,8 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             wait=False,
             prefix='src'
         )
+        if src_flag_job_ids:
+            logger.info(f"Source flagging running in background ({len(src_flag_job_ids)} jobs)")
     
     # Wait for calibration
     logger.substep("Waiting for calibration round 1...")
@@ -305,18 +329,25 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         results = hk.wait_and_check(cal_job_ids, whitelist=whitelist)
         
         successful = []
+        failed_spws = []
         for job_id, (job, log_result) in results.items():
             spw = job.job_subdir if hasattr(job, 'job_subdir') else 'unknown'
             if log_result.success:
                 successful.append(spw)
                 logger.info(f"{spw}: Calibration OK")
             else:
+                failed_spws.append(spw)
                 logger.error(f"{spw}: Calibration FAILED")
                 if log_result.error_lines:
                     for err in log_result.error_lines[:3]:
                         logger.error(f"  >> {err}")
         
+        if failed_spws:
+            logger.warning(f"Calibration round 1 failed for: {failed_spws}")
+            pipeline_status['warnings'].append(f"Cal1 failed for {failed_spws}")
+        
         if not successful and brotherhood:
+            pipeline_status['failed_steps'].append('cal1')
             return False
         
         active_spws = successful if successful else active_spws
@@ -334,6 +365,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     )
     
     logger.success("Calibration round 1 complete")
+    pipeline_status['completed_steps'].append('cal1')
     
     # =========================================================================
     # STEP 8: POST-CAL FLAGGING
@@ -367,6 +399,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     )
     
     logger.success("Post-cal flagging complete")
+    pipeline_status['completed_steps'].append('postcal_flag')
     
     # =========================================================================
     # STEP 9: CALIBRATION ROUND 2
@@ -386,6 +419,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     )
     
     if active_spws is None:
+        pipeline_status['failed_steps'].append('cal2')
         if brotherhood:
             return False
     
@@ -402,6 +436,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     )
     
     logger.success("Calibration round 2 complete")
+    pipeline_status['completed_steps'].append('cal2')
     
     # =========================================================================
     # STEP 10: APPLY TO TARGETS + CHECK SOURCE FLAGGING
@@ -411,8 +446,23 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         
         # Check if source flagging done
         if src_flag_job_ids:
-            logger.substep("Checking source flagging status...")
-            hk.wait_and_check(src_flag_job_ids, whitelist=whitelist, timeout=300)
+            logger.substep("Checking if source flagging completed...")
+            logger.info(f"Waiting for {len(src_flag_job_ids)} source flagging jobs...")
+            results = hk.wait_and_check(src_flag_job_ids, whitelist=whitelist, timeout=300)
+            
+            src_flag_ok = 0
+            src_flag_fail = 0
+            for job_id, (job, log_result) in results.items():
+                if log_result.success:
+                    src_flag_ok += 1
+                else:
+                    src_flag_fail += 1
+            
+            logger.info(f"Source flagging: {src_flag_ok} OK, {src_flag_fail} failed")
+            if src_flag_fail > 0:
+                pipeline_status['warnings'].append(f"Source flagging: {src_flag_fail} jobs had issues")
+        else:
+            logger.info("No source flagging jobs were running")
         
         # Apply calibration to targets
         run_applycal(
@@ -427,6 +477,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         )
         
         logger.success("Applied to targets")
+        pipeline_status['completed_steps'].append('apply_targets')
     
     # =========================================================================
     # STEP 11: FINAL FLAGGING
@@ -485,10 +536,34 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         )
     
     logger.success("Final flagging complete")
+    pipeline_status['completed_steps'].append('final_flag')
     
     # =========================================================================
-    # STEP 12: IMAGING + SELF-CALIBRATION (if configured)
+    # STEP 12: DIAGNOSTIC PLOTS (if requested)
     # =========================================================================
+    if do_plotting:
+        from .utils.plotting_utils.plotting import run_diagnostic_plots
+        
+        logger.step("GENERATING DIAGNOSTIC PLOTS")
+        
+        run_diagnostic_plots(
+            hk=hk,
+            config=config,
+            active_spws=active_spws,
+            cal_plan=cal_plan,
+            do_polcal=do_polcal,
+            logger=logger,
+            whitelist=whitelist,
+            plot_targets=bool(cal_plan['targets'])
+        )
+        
+        logger.success("Diagnostic plots complete")
+        pipeline_status['completed_steps'].append('plotting')
+    
+    # =========================================================================
+    # STEP 13: IMAGING + SELF-CALIBRATION (if configured)
+    # =========================================================================
+    selfcal_success = True
     if flow.get('imaging_selfcal'):
         from .utils.selfcal_utils.prepare import prepare_selfcal_ms
         from .utils.selfcal_utils.imaging import run_dirty_image, run_wsclean
@@ -500,15 +575,13 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         loops_config = selfcal_config.get('loops', {})
         setup_config = flow.get('imaging_selfcal', {}).get('setup', {})
         
-        # Brotherhood for selfcal (separate from calibration brotherhood)
         selfcal_brotherhood = setup_config.get('brotherhood', True)
-        
-        # Get refant - user specified or from calibration
         selfcal_refant = loops_config.get('refant') or refant
+        
         logger.info(f"Using refant for selfcal: {selfcal_refant}")
         logger.info(f"Selfcal brotherhood: {selfcal_brotherhood}")
         
-        # Prepare MS (split per field, freq average)
+        # Prepare MS
         freqbin = selfcal_config.get('freqbin', 10)
         
         ms_map = prepare_selfcal_ms(
@@ -522,7 +595,9 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         )
         
         if not ms_map:
-            logger.error("Failed to prepare MS for selfcal")
+            logger.error("Failed to prepare MS for selfcal!")
+            pipeline_status['failed_steps'].append('selfcal')
+            selfcal_success = False
             if not selfcal_brotherhood:
                 return False
         else:
@@ -552,7 +627,9 @@ ms = '{ms_path}'
 # Catboss initial - sigma 6.0, combinations 1,2
 cmd = f"catboss --cat pooh {{ms}} --combinations 1,2 --sigma 6.0 --rho 1.5 --poly-degree 5 --deviation-threshold 3.0 --datacolumn DATA --apply-flags --max-threads {ppn} --max-memory-usage 0.8 --verbose"
 print(f"Running: {{cmd}}")
-subprocess.run(cmd, shell=True)
+result = subprocess.run(cmd, shell=True)
+if result.returncode != 0:
+    print(f"WARNING: Catboss exited with code {{result.returncode}}")
 
 # Remove lock
 lock_file = os.path.join(ms, 'table.lock')
@@ -587,26 +664,37 @@ python3 {script_file}
                     logger.substep(f"Waiting for {len(flag_jobs)} initial flagging jobs...")
                     results = hk.wait_and_check(flag_jobs, whitelist=whitelist)
                     
+                    flag_ok = 0
+                    flag_fail = 0
                     for job_id, (job, log_result) in results.items():
                         field, spw = flag_job_map.get(job_id, ('unknown', 'unknown'))
                         if log_result.success:
+                            flag_ok += 1
                             logger.info(f"{spw}/{field}: OK")
                         else:
-                            logger.warning(f"{spw}/{field}: flagging issues")
+                            flag_fail += 1
+                            logger.warning(f"{spw}/{field}: flagging had issues")
+                            if log_result.error_lines:
+                                for err in log_result.error_lines[:2]:
+                                    logger.error(f"  >> {err}")
+                    
+                    logger.info(f"Initial flagging: {flag_ok} OK, {flag_fail} had issues")
             
             # Dirty image if requested
             if flow.get('imaging_selfcal', {}).get('dirty_image', False):
                 logger.substep("Creating dirty images...")
-                run_dirty_image(
+                dirty_result = run_dirty_image(
                     hk=hk,
                     config=config,
                     ms_map=ms_map,
                     logger=logger,
                     whitelist=whitelist
                 )
+                if not dirty_result:
+                    logger.warning("Dirty imaging had issues")
             
             # Run selfcal loop
-            ms_map = run_selfcal_loop(
+            ms_map_result = run_selfcal_loop(
                 hk=hk,
                 config=config,
                 ms_map=ms_map,
@@ -615,15 +703,43 @@ python3 {script_file}
                 whitelist=whitelist
             )
             
-            if ms_map:
+            if ms_map_result:
                 logger.success("Self-calibration complete!")
+                pipeline_status['completed_steps'].append('selfcal')
             else:
-                logger.warning("Self-calibration had issues")
+                logger.error("Self-calibration FAILED!")
+                pipeline_status['failed_steps'].append('selfcal')
+                selfcal_success = False
     
     # =========================================================================
-    # DONE
+    # PIPELINE SUMMARY
     # =========================================================================
-    logger.success("PIPELINE COMPLETE!")
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("PIPELINE SUMMARY")
+    logger.info("=" * 60)
+    logger.info(f"Completed steps: {pipeline_status['completed_steps']}")
+    
+    if pipeline_status['failed_steps']:
+        logger.error(f"Failed steps: {pipeline_status['failed_steps']}")
+    
+    if pipeline_status['warnings']:
+        logger.warning("Warnings during pipeline:")
+        for w in pipeline_status['warnings']:
+            logger.warning(f"  - {w}")
+    
     logger.info(f"Active SPWs: {active_spws}")
     
-    return True
+    # Determine final status
+    all_requested = set(pipeline_status['all_steps_requested'])
+    all_completed = set(pipeline_status['completed_steps'])
+    missing_steps = all_requested - all_completed
+    
+    if missing_steps:
+        logger.error(f"Pipeline did NOT complete all requested steps!")
+        logger.error(f"Missing: {missing_steps}")
+        logger.warning("PIPELINE FINISHED WITH INCOMPLETE STEPS")
+        return False
+    else:
+        logger.success("PIPELINE COMPLETE - ALL REQUESTED STEPS FINISHED!")
+        return True

@@ -151,7 +151,7 @@ bandpass(
     spw='',
     solint='inf',
     refant='{refant}',
-    minsnr=2.0,
+    minsnr=3.0,
     gaintable=['{caltable_g}'],
     solnorm={solnorm}
 )
@@ -457,7 +457,8 @@ if result.returncode != 0:
     print("Catboss failed but continuing...")
 
 # Nami on CORRECTED_DATA with nknots=3
-nami_cmd = f"nami {{ms}} --datacolumn CORRECTED_DATA --sigma 5.0 --nknots 3 --timebin 10.0 --ncpu {ppn}"
+# timebin is in MINUTES
+nami_cmd = f"nami {{ms}} --datacolumn CORRECTED_DATA --sigma 5.0 --nknots 3 --timebin 10 --ncpu {ppn}"
 print(f"Running: {{nami_cmd}}")
 result = subprocess.run(nami_cmd, shell=True)
 if result.returncode != 0:

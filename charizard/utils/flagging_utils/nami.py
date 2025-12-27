@@ -13,17 +13,18 @@ from housekeeper import Housekeeper
 
 
 # Hardcoded NAMI defaults
+# Note: timebin is in MINUTES
 NAMI_DEFAULTS = {
     'sigma': 5.0,
     'nknots': 2,
-    'timebin': 30.0,
+    'timebin': 30.0,  # minutes
 }
 
 # For selfcal residual flagging
 NAMI_SELFCAL_DEFAULTS = {
     'sigma': 5.0,
     'nknots': 3,
-    'timebin': 30.0,
+    'timebin': 10.0,  # minutes
 }
 
 
