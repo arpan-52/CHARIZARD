@@ -30,7 +30,7 @@ flow:
     calibration:
       refant: C00
       pol: {leakage: {mode: Df}, angle: true}
-      control: {check_solutions: true}
+      control: {check_solutions: true, plot: true}
       apply: {targets: true, calibrators: true}
 
   imaging_selfcal:
