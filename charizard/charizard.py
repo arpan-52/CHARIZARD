@@ -481,59 +481,41 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     
     # =========================================================================
     # STEP 11: FINAL FLAGGING
+    # All catboss in parallel, then all nami in parallel
     # =========================================================================
     logger.step("FINAL FLAGGING")
     
-    # On cal.ms
+    # Catboss on ALL (cal.ms + src.ms) in parallel
+    ms_to_flag = ['cal.ms']
+    if cal_plan['targets']:
+        ms_to_flag.append('src.ms')
+    
+    logger.substep(f"Running catboss on {ms_to_flag}...")
     run_catboss(
         hk=hk,
         config=config,
         active_spws=active_spws,
-        ms_names=['cal.ms'],
+        ms_names=ms_to_flag,
         stage='final',
         datacolumn='CORRECTED_DATA',
         logger=logger,
         whitelist=whitelist,
-        prefix='final_cal'
+        prefix='final'
     )
     
+    # Nami on ALL (cal.ms + src.ms) in parallel
+    logger.substep(f"Running NAMI on {ms_to_flag}...")
     run_nami(
         hk=hk,
         config=config,
         active_spws=active_spws,
-        ms_names=['cal.ms'],
+        ms_names=ms_to_flag,
         datacolumn='CORRECTED_DATA',
         logger=logger,
         whitelist=whitelist,
         sigma=5.0,
-        prefix='final_cal'
+        prefix='final'
     )
-    
-    # On src.ms
-    if cal_plan['targets']:
-        run_catboss(
-            hk=hk,
-            config=config,
-            active_spws=active_spws,
-            ms_names=['src.ms'],
-            stage='final',
-            datacolumn='CORRECTED_DATA',
-            logger=logger,
-            whitelist=whitelist,
-            prefix='final_src'
-        )
-        
-        run_nami(
-            hk=hk,
-            config=config,
-            active_spws=active_spws,
-            ms_names=['src.ms'],
-            datacolumn='CORRECTED_DATA',
-            logger=logger,
-            whitelist=whitelist,
-            sigma=5.0,
-            prefix='final_src'
-        )
     
     logger.success("Final flagging complete")
     pipeline_status['completed_steps'].append('final_flag')
@@ -706,10 +688,206 @@ python3 {script_file}
             if ms_map_result:
                 logger.success("Self-calibration complete!")
                 pipeline_status['completed_steps'].append('selfcal')
+                
+                # Store final image info for DDCal
+                selfcal_final_images = ms_map_result
             else:
                 logger.error("Self-calibration FAILED!")
                 pipeline_status['failed_steps'].append('selfcal')
                 selfcal_success = False
+                selfcal_final_images = None
+    
+    # =========================================================================
+    # STEP 14: DIRECTION-DEPENDENT CALIBRATION (if configured)
+    # =========================================================================
+    if flow.get('dd_cal') and selfcal_success:
+        from .utils.ddcal_utils.concat import concat_ms
+        from .utils.ddcal_utils.pybdsf_runner import run_pybdsf
+        from .utils.ddcal_utils.artifact_detector import detect_artifacts, create_ds9_regions, get_sources_for_peeling
+        from .utils.ddcal_utils.peeling import run_peeling_loop
+        from .utils.selfcal_utils.imaging import run_wsclean
+        
+        logger.step("DIRECTION-DEPENDENT CALIBRATION (PEELING)")
+        pipeline_status['all_steps_requested'].append('ddcal')
+        
+        ddcal_config = flow.get('dd_cal', {})
+        source_finding = ddcal_config.get('source_finding', {})
+        
+        flux_threshold = source_finding.get('flux_threshold_mJy', 50)
+        eps_factor = source_finding.get('eps_factor', 5)
+        min_samples = source_finding.get('min_samples', 3)
+        mask_radius_factor = source_finding.get('mask_radius_factor', 2.5)
+        
+        logger.info(f"Flux threshold: {flux_threshold} mJy")
+        logger.info(f"Clustering params: eps_factor={eps_factor}, min_samples={min_samples}")
+        
+        # Get ms_map from selfcal results
+        if ms_map_result:
+            selfcal_ms_map = ms_map_result
+        else:
+            logger.error("No selfcal MS available for DDCal")
+            pipeline_status['failed_steps'].append('ddcal')
+        
+        if selfcal_ms_map:
+            # Step 1: Concat MS (in parallel with PyBDSF)
+            # Step 2: PyBDSF on final Stokes I image
+            
+            # Find final Stokes I images
+            stokes_i_images = {}
+            for field in selfcal_ms_map.keys():
+                image_path = f"images/{field}/final_I_{field}-MFS-image.fits"
+                source_list_path = f"images/{field}/final_I_{field}-sources.txt"
+                if os.path.exists(image_path):
+                    stokes_i_images[field] = image_path
+                    logger.info(f"Found Stokes I image for {field}: {image_path}")
+            
+            if not stokes_i_images:
+                logger.error("No final Stokes I images found for DDCal")
+                pipeline_status['failed_steps'].append('ddcal')
+            else:
+                # Launch concat and pybdsf in parallel
+                logger.substep("Launching MS concat and PyBDSF in parallel...")
+                
+                # Submit concat jobs (don't wait)
+                concat_job_ids = []
+                # We need to adapt - concat needs the selfcal MS paths
+                # For now, do them sequentially
+                
+                # Step 1: Concat MS
+                combined_ms_map = concat_ms(
+                    hk=hk,
+                    config=config,
+                    ms_map=selfcal_ms_map,
+                    logger=logger,
+                    whitelist=whitelist
+                )
+                
+                if not combined_ms_map:
+                    logger.error("MS concatenation failed")
+                    pipeline_status['failed_steps'].append('ddcal')
+                else:
+                    # Step 2: PyBDSF
+                    pybdsf_results = run_pybdsf(
+                        hk=hk,
+                        config=config,
+                        image_map=stokes_i_images,
+                        logger=logger,
+                        whitelist=whitelist
+                    )
+                    
+                    if not pybdsf_results:
+                        logger.error("PyBDSF failed")
+                        pipeline_status['failed_steps'].append('ddcal')
+                    else:
+                        # Step 3: Artifact detection and region creation
+                        logger.substep("Detecting artifacts and creating regions...")
+                        
+                        for field in combined_ms_map.keys():
+                            if field not in pybdsf_results:
+                                logger.warning(f"No PyBDSF results for {field}")
+                                continue
+                            
+                            catalog_file = pybdsf_results[field]['catalog']
+                            mfs_image = stokes_i_images[field]
+                            
+                            # Detect artifacts
+                            sources = detect_artifacts(
+                                catalog_file=catalog_file,
+                                mfs_image=mfs_image,
+                                flux_threshold_mJy=flux_threshold,
+                                eps_factor=eps_factor,
+                                min_samples=min_samples,
+                                mask_radius_factor=mask_radius_factor
+                            )
+                            
+                            if not sources:
+                                logger.info(f"{field}: No bright sources to peel")
+                                continue
+                            
+                            logger.info(f"{field}: Found {len(sources)} sources to peel")
+                            
+                            # Create all-sources region file
+                            region_file = f"ddcal_output/{field}/peel_sources.reg"
+                            create_ds9_regions(sources, region_file)
+                            logger.info(f"Created region file: {region_file}")
+                            
+                            # Get source list file from final imaging
+                            source_list_file = f"images/{field}/final_I_{field}-sources.txt"
+                            
+                            # Step 4: Sequential peeling
+                            sources_sorted = get_sources_for_peeling(sources)
+                            
+                            final_column = run_peeling_loop(
+                                hk=hk,
+                                config=config,
+                                field=field,
+                                sources=sources_sorted,
+                                source_list_file=source_list_file,
+                                ms_path=combined_ms_map[field],
+                                logger=logger,
+                                whitelist=whitelist
+                            )
+                            
+                            if final_column:
+                                # Step 5: Final peeled image
+                                logger.substep(f"Creating final peeled image for {field}...")
+                                
+                                # Get imaging params
+                                selfcal_config = flow.get('imaging_selfcal', {}).get('selfcal', {})
+                                imaging_config = selfcal_config.get('imaging', {})
+                                imsize = imaging_config.get('imsize', 4096)
+                                cellsize = imaging_config.get('cellsize', '1asec')
+                                
+                                # Final peeled image - fixed params
+                                peeled_image_script = f'''#!/bin/bash
+cd {os.getcwd()}
+{config.environment.get('shell_preamble', '')}
+
+wsclean \\
+    -name ddcal_output/{field}/peeled_{field} \\
+    -weight briggs 0.0 \\
+    -super-weight 1.0 \\
+    -size {imsize} {imsize} \\
+    -scale {cellsize} \\
+    -channels-out 4 \\
+    -pol I \\
+    -data-column {final_column} \\
+    -niter 50000 \\
+    -auto-mask 7 \\
+    -auto-threshold 3 \\
+    -gain 0.1 \\
+    -mgain 0.7 \\
+    -join-channels \\
+    -multiscale \\
+    -multiscale-scale-bias 0.6 \\
+    -fit-spectral-pol 3 \\
+    -fit-beam \\
+    -padding 1.3 \\
+    {combined_ms_map[field]}
+'''
+                                script_file = f"wsclean_peeled_{field}.sh"
+                                with open(script_file, 'w') as f:
+                                    f.write(peeled_image_script)
+                                os.chmod(script_file, 0o755)
+                                
+                                job = hk.submit(
+                                    command=f"bash {os.getcwd()}/{script_file}",
+                                    name=f"wsclean_peeled_{field}",
+                                    job_subdir=f"ddcal_output/{field}",
+                                    ppn=config.resources.get('imaging', {}).get('ppn', 8),
+                                    walltime='04:00:00'
+                                )
+                                
+                                if job.job_id:
+                                    results = hk.wait_and_check([job.job_id], whitelist=whitelist)
+                                    for jid, (j, log_result) in results.items():
+                                        if log_result.success:
+                                            logger.success(f"{field}: Peeled image complete!")
+                                        else:
+                                            logger.warning(f"{field}: Peeled imaging had issues")
+                        
+                        pipeline_status['completed_steps'].append('ddcal')
+                        logger.success("DDCal complete!")
     
     # =========================================================================
     # PIPELINE SUMMARY

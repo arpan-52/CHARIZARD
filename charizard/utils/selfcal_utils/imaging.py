@@ -18,7 +18,9 @@ def build_wsclean_command(ms_list: List[str],
                           datacolumn: str = 'DATA',
                           threshold: float = 0.001,
                           use_mask: bool = False,
-                          mask_path: str = None) -> str:
+                          mask_path: str = None,
+                          stokes: str = 'I',
+                          save_source_list: bool = False) -> str:
     """
     Build wsclean command.
     
@@ -32,6 +34,8 @@ def build_wsclean_command(ms_list: List[str],
         threshold: Clean threshold in Jy
         use_mask: Whether to use a mask
         mask_path: Path to FITS mask
+        stokes: Stokes parameter (I, Q, U, V)
+        save_source_list: Whether to save wsclean source list
     
     Returns:
         wsclean command string
@@ -45,7 +49,7 @@ def build_wsclean_command(ms_list: List[str],
     -size {imsize} {imsize} \\
     -scale {cellsize} \\
     -channels-out 4 \\
-    -pol I \\
+    -pol {stokes} \\
     -data-column {datacolumn} \\
     -niter {niter} \\
     -auto-mask 7 \\
@@ -65,6 +69,9 @@ def build_wsclean_command(ms_list: List[str],
     if use_mask and mask_path and os.path.exists(mask_path):
         cmd += f" \\\n    -fits-mask {mask_path}"
     
+    if save_source_list:
+        cmd += f" \\\n    -save-source-list"
+    
     cmd += f" \\\n    {ms_str}"
     
     return cmd
@@ -78,7 +85,9 @@ def run_wsclean(hk: Housekeeper,
                 logger,
                 whitelist: List[str],
                 datacolumn: str = 'DATA',
-                use_masks: bool = False) -> Optional[Dict[str, str]]:
+                use_masks: bool = False,
+                stokes: str = 'I',
+                save_source_list: bool = False) -> Optional[Dict[str, str]]:
     """
     Run wsclean for all fields in parallel.
     
@@ -92,11 +101,13 @@ def run_wsclean(hk: Housekeeper,
         whitelist: Error whitelist
         datacolumn: Data column to image
         use_masks: Whether to use masks
+        stokes: Stokes parameter (I, Q, U, V)
+        save_source_list: Whether to save wsclean source list
     
     Returns:
         Dict mapping field -> image path, or None on failure
     """
-    logger.substep(f"Running wsclean ({prefix}, niter={niter})...")
+    logger.substep(f"Running wsclean ({prefix}, niter={niter}, stokes={stokes})...")
     
     env = config.environment
     preamble = env.get('shell_preamble', '')
@@ -142,7 +153,9 @@ def run_wsclean(hk: Housekeeper,
             datacolumn=datacolumn,
             threshold=threshold,
             use_mask=use_masks,
-            mask_path=mask_path
+            mask_path=mask_path,
+            stokes=stokes,
+            save_source_list=save_source_list
         )
         
         script_file = f"wsclean_{prefix}_{field}.sh"
@@ -178,18 +191,22 @@ def run_wsclean(hk: Housekeeper,
     logger.substep(f"Waiting for {len(job_ids)} wsclean jobs...")
     results = hk.wait_and_check(job_ids, whitelist=whitelist)
     
-    # Collect results
+    # Collect results - just check if job succeeded, don't check files
     image_map = {}
     
     for job_id, (job, log_result) in results.items():
         field = job_map.get(job_id, 'unknown')
         image_path = f"images/{field}/{prefix}_{field}-MFS-image.fits"
+        source_list_path = f"images/{field}/{prefix}_{field}-sources.txt"
         
-        if log_result.success and os.path.exists(image_path):
-            image_map[field] = image_path
+        if log_result.success:
+            image_map[field] = {
+                'image': image_path,
+                'source_list': source_list_path if save_source_list else None
+            }
             logger.info(f"{field}: OK")
         else:
-            logger.warning(f"{field}: wsclean failed")
+            logger.warning(f"{field}: wsclean had issues")
             if log_result.error_lines:
                 for err in log_result.error_lines[:3]:
                     logger.error(f"  >> {err}")

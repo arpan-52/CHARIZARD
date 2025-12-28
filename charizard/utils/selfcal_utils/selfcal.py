@@ -735,22 +735,43 @@ def run_selfcal_loop(hk: Housekeeper,
         round_idx += 1
     
     # =========================================================================
-    # FINAL IMAGE
+    # FINAL IMAGE - This IS the final selfcal product
+    # If polcal: I, Q, U, V (4 separate runs, save sources only for I)
+    # If no polcal: only I (save sources)
     # =========================================================================
-    logger.substep("=== Creating final image ===")
+    logger.substep("=== Creating final selfcal images ===")
     final_niter = niter_sequence[min(round_idx, len(niter_sequence)-1)] * 2
     
-    run_wsclean(
-        hk=hk,
-        config=config,
-        ms_map=ms_map,
-        niter=final_niter,
-        prefix='final',
-        logger=logger,
-        whitelist=whitelist,
-        datacolumn='CORRECTED_DATA',
-        use_masks=True
-    )
+    # Check if polcal was done
+    do_polcal = config.flow.get('initial_calibration_flagging', {}).get('calibration', {}).get('pol', {}).get('angle', False)
+    
+    if do_polcal:
+        # Full Stokes: I, Q, U, V
+        stokes_list = ['I', 'Q', 'U', 'V']
+        logger.info("Full polarization calibration - imaging I, Q, U, V")
+    else:
+        # Only Stokes I
+        stokes_list = ['I']
+        logger.info("No polarization calibration - imaging only Stokes I")
+    
+    for stokes in stokes_list:
+        save_sources = (stokes == 'I')  # Only save source list for Stokes I
+        
+        logger.info(f"Imaging Stokes {stokes} (save_sources={save_sources})...")
+        
+        run_wsclean(
+            hk=hk,
+            config=config,
+            ms_map=ms_map,
+            niter=final_niter,
+            prefix=f'final_{stokes}',
+            logger=logger,
+            whitelist=whitelist,
+            datacolumn='CORRECTED_DATA',
+            use_masks=True,
+            stokes=stokes,
+            save_source_list=save_sources
+        )
     
     # Summary
     if all_failed_fields:

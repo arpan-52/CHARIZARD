@@ -79,7 +79,7 @@ mstransform(
     vis='{src_ms}',
     outputvis='{output_ms}',
     field='{field}',
-    datacolumn='corrected',
+    datacolumn='data',
     chanaverage=True,
     chanbin={freqbin},
     keepflags=True
