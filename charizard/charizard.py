@@ -39,10 +39,48 @@ from .utils.calibration_utils.gains import run_calibration
 from .utils.calibration_utils.applycal import run_applycal
 
 
+# Step order for --start and --end
+STEP_ORDER = [
+    'analyze', 'split', 'badant', 'initial_flag', 'rfi_flag',
+    'refant', 'cal1', 'postcal_flag', 'cal2', 'apply_targets',
+    'final_flag', 'plotting', 'selfcal', 'ddcal'
+]
+
+
+def should_run_step(step: str, start_step: Optional[str], end_step: Optional[str]) -> bool:
+    """Check if a step should run based on start/end parameters."""
+    if start_step is None and end_step is None:
+        return True
+    
+    step_idx = STEP_ORDER.index(step)
+    
+    if start_step:
+        start_idx = STEP_ORDER.index(start_step)
+        if step_idx < start_idx:
+            return False
+    
+    if end_step:
+        end_idx = STEP_ORDER.index(end_step)
+        if step_idx > end_idx:
+            return False
+    
+    return True
+
+
 def charizard(config, logger, scheduler_config: Optional[str] = None,
-              whitelist: List[str] = None) -> bool:
+              whitelist: List[str] = None,
+              start_step: Optional[str] = None,
+              end_step: Optional[str] = None) -> bool:
     """
     Run the full calibration pipeline.
+    
+    Args:
+        config: PipelineConfig
+        logger: PipelineLogger
+        scheduler_config: Path to scheduler config
+        whitelist: Error whitelist for log checking
+        start_step: Start from this step (skip earlier steps)
+        end_step: End at this step (skip later steps)
     
     Returns True ONLY if ALL requested steps completed successfully.
     """
@@ -75,9 +113,13 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     user_refant = calibration.get('refant')
     do_plotting = control.get('plot', False)
     
-    # Build list of requested steps
-    pipeline_status['all_steps_requested'] = ['analyze', 'split', 'badant', 'initial_flag', 
-                                               'rfi_flag', 'refant', 'cal1', 'postcal_flag',
+    # Build list of requested steps (only those that will run)
+    pipeline_status['all_steps_requested'] = [
+        s for s in ['analyze', 'split', 'badant', 'initial_flag', 
+                    'rfi_flag', 'refant', 'cal1', 'postcal_flag',
+                    'cal2', 'apply_targets', 'final_flag']
+        if should_run_step(s, start_step, end_step)
+    ]
                                                'cal2', 'apply_targets', 'final_flag']
     if do_plotting:
         pipeline_status['all_steps_requested'].append('plotting')
@@ -734,15 +776,31 @@ python3 {script_file}
             
             # Find final Stokes I images
             stokes_i_images = {}
+            logger.info(f"Looking for images for fields: {list(selfcal_ms_map.keys())}")
+            
             for field in selfcal_ms_map.keys():
                 image_path = f"images/{field}/final_I_{field}-MFS-image.fits"
                 source_list_path = f"images/{field}/final_I_{field}-sources.txt"
+                
+                logger.info(f"Checking: {image_path}")
+                
                 if os.path.exists(image_path):
                     stokes_i_images[field] = image_path
                     logger.info(f"Found Stokes I image for {field}: {image_path}")
+                else:
+                    # Try to find any images for this field
+                    field_dir = f"images/{field}"
+                    if os.path.exists(field_dir):
+                        import glob
+                        found_images = glob.glob(f"{field_dir}/*-MFS-image.fits")
+                        if found_images:
+                            logger.warning(f"Expected {image_path} but found: {found_images}")
+                    else:
+                        logger.warning(f"Field directory does not exist: {field_dir}")
             
             if not stokes_i_images:
                 logger.error("No final Stokes I images found for DDCal")
+                logger.error("Make sure selfcal completed successfully and produced images")
                 pipeline_status['failed_steps'].append('ddcal')
             else:
                 # Launch concat and pybdsf in parallel

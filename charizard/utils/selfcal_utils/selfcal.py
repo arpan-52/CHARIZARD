@@ -151,7 +151,7 @@ bandpass(
     spw='',
     solint='inf',
     refant='{refant}',
-    minsnr=3.0,
+    minsnr=2.0,
     gaintable=['{caltable_g}'],
     solnorm={solnorm}
 )
@@ -529,6 +529,12 @@ def run_selfcal_loop(hk: Housekeeper,
        - foresight + crystalball + quartical
     3. Amp+phase cal rounds (gaincal+bandpass, calmode='ap', solnorm=False)
        - Image -> Calibrate -> Flag residuals
+    4. Final image (checks MS correlations: 4 corrs -> I,Q,U,V, 2 corrs -> I only)
+    
+    Brotherhood: per-field. If any SPW fails for a field and brotherhood=True, STOP.
+    """
+    """
+       - Image -> Calibrate -> Flag residuals
     4. Final image
     
     Brotherhood: per-field. If all SPWs fail for a field, drop it.
@@ -615,8 +621,9 @@ def run_selfcal_loop(hk: Housekeeper,
         
         all_failed_fields.extend(failed)
         
-        if not brotherhood and failed:
-            logger.error(f"Brotherhood=False and fields failed: {failed}")
+        # Brotherhood: if TRUE and any SPW failed, STOP
+        if brotherhood and failed:
+            logger.error(f"Brotherhood=True, failures detected: {failed}, stopping!")
             return None
         
         # 3. Flag residuals
@@ -717,8 +724,9 @@ def run_selfcal_loop(hk: Housekeeper,
         
         all_failed_fields.extend(failed)
         
-        if not brotherhood and failed:
-            logger.error(f"Brotherhood=False and fields failed: {failed}")
+        # Brotherhood: if TRUE and any SPW failed, STOP
+        if brotherhood and failed:
+            logger.error(f"Brotherhood=True, failures detected: {failed}, stopping!")
             return None
         
         # 3. Flag residuals
@@ -736,23 +744,38 @@ def run_selfcal_loop(hk: Housekeeper,
     
     # =========================================================================
     # FINAL IMAGE - This IS the final selfcal product
-    # If polcal: I, Q, U, V (4 separate runs, save sources only for I)
-    # If no polcal: only I (save sources)
+    # Check actual correlations in the MS:
+    # 4 correlations (RR,RL,LR,LL or XX,XY,YX,YY) -> I, Q, U, V
+    # 2 correlations (RR,LL or XX,YY) -> I only
     # =========================================================================
     logger.substep("=== Creating final selfcal images ===")
     final_niter = niter_sequence[min(round_idx, len(niter_sequence)-1)] * 2
     
-    # Check if polcal was done
-    do_polcal = config.flow.get('initial_calibration_flagging', {}).get('calibration', {}).get('pol', {}).get('angle', False)
+    # Check number of correlations in one of the selfcal MS files
+    num_corrs = 2  # Default to 2 (safe - only Stokes I)
+    try:
+        first_field = list(ms_map.keys())[0]
+        first_ms = ms_map[first_field][0]
+        
+        from casatools import table
+        tb = table()
+        tb.open(first_ms + '/POLARIZATION')
+        corr_types = tb.getcol('CORR_TYPE')
+        tb.close()
+        num_corrs = corr_types.shape[0]
+        logger.info(f"Selfcal MS has {num_corrs} correlations")
+    except Exception as e:
+        logger.warning(f"Could not check correlations in MS: {e}")
+        logger.warning("Defaulting to Stokes I only")
     
-    if do_polcal:
-        # Full Stokes: I, Q, U, V
+    if num_corrs >= 4:
+        # Have all 4 correlations - can make I, Q, U, V
         stokes_list = ['I', 'Q', 'U', 'V']
-        logger.info("Full polarization calibration - imaging I, Q, U, V")
+        logger.info("4 correlations available - imaging I, Q, U, V")
     else:
-        # Only Stokes I
+        # Only parallel hands (2 corrs) - can only make Stokes I
         stokes_list = ['I']
-        logger.info("No polarization calibration - imaging only Stokes I")
+        logger.info("2 correlations available - imaging only Stokes I")
     
     for stokes in stokes_list:
         save_sources = (stokes == 'I')  # Only save source list for Stokes I
