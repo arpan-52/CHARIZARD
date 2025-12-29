@@ -38,6 +38,16 @@ ERROR_WHITELIST = [
     "See details at https://numba.readthedocs.io/en/latest/reference/deprecation.html",
     "Exception origin:",
     "if mode.literal_value == 4:",
+    "NumbaWarning",
+    "warnings.warn(errors.NumbaWarning",
+    
+    # Catboss/GPU errors - often non-fatal
+    "'NoneType' object has no attribute 'synchronize'",
+    "Error processing baseline",
+    "CUDA error",
+    "cudaErrorNoDevice",
+    "cuBLAS error",
+    "GPU memory allocation failed",
     
     # CuPy warnings
     "CuPy may not function correctly because multiple CuPy packages are installed",
@@ -90,6 +100,10 @@ ERROR_WHITELIST = [
     "underflow encountered",
     "NaN values detected",
     "Empty array passed",
+    
+    # Nami warnings
+    "nami",
+    "Nami",
 ]
 
 

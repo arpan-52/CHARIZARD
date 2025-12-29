@@ -2,23 +2,25 @@
 """
 Self-calibration loop.
 
-Brotherhood logic (same as entire pipeline):
-- Housekeeper checks job success via logs + whitelist
-- If any SPW fails and brotherhood=True → STOP
-- If any SPW fails and brotherhood=False → Remove SPW, continue
-
 Flow per round:
-1. Flag (catboss + nami on DATA)
-2. Image (wsclean)
-3. Calibrate (gaincal + bandpass + applycal + mstransform)
+1. Catboss (GPU, parallel) on DATA
+2. Nami (CPU, parallel) on DATA  
+3. Image (wsclean)
+4. Calibrate (gaincal + bandpass + applycal + mstransform)
+
+Brotherhood: if ANY SPW fails and brotherhood=True → STOP
 """
 
 import os
 import time
 import yaml
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 
 from housekeeper import Housekeeper
+
+# Import existing flagging functions
+from ..flagging_utils.catboss import run_catboss
+from ..flagging_utils.nami import run_nami
 
 
 def get_solint_sequence(phase_rounds: int, ap_rounds: int, initial_solint: str) -> List[str]:
@@ -38,115 +40,119 @@ def get_niter_sequence(start_iters: int, total_rounds: int) -> List[int]:
     return sequence
 
 
-def run_flag_ms(hk: Housekeeper,
-                config,
-                ms_map: Dict[str, List[str]],
-                round_name: str,
-                logger,
-                whitelist: List[str],
-                brotherhood: bool) -> Optional[Dict[str, List[str]]]:
+def run_selfcal_flagging(hk: Housekeeper,
+                         config,
+                         ms_map: Dict[str, List[str]],
+                         round_name: str,
+                         logger,
+                         whitelist: List[str],
+                         brotherhood: bool) -> Optional[Dict[str, List[str]]]:
     """
-    Run catboss + nami flagging on DATA column before imaging.
+    Run catboss (GPU) then nami (CPU) on selfcal MS files.
+    Uses existing run_catboss and run_nami functions.
     
     Returns:
-        Updated ms_map (failed SPWs removed if brotherhood=False), or None if brotherhood=True and failure
+        Updated ms_map, or None if failure and brotherhood=True
     """
-    logger.substep(f"Flagging before {round_name}...")
+    # Convert ms_map to list of (spw, ms_path) for flagging
+    # ms_map: {field: [spw0/field/sc.ms, spw1/field/sc.ms, ...]}
     
-    env = config.environment
-    preamble = env.get('shell_preamble', '')
-    resources = config.resources.get('flagging', config.resources.get('default', {}))
-    ppn = resources.get('ppn', 8)
-    
-    job_ids = []
-    job_map = {}  # job_id -> (field, spw, ms_path)
-    
+    # Get unique SPWs and build spw -> ms_name mapping
+    spw_ms_map = {}  # spw -> [ms_names relative to spw dir]
     for field, ms_list in ms_map.items():
         for ms_path in ms_list:
-            if not os.path.exists(ms_path):
-                continue
-            
+            # ms_path = spw0/G71+28/sc.ms
             parts = ms_path.split('/')
             spw = parts[0]
-            field_dir = f"{spw}/{field}"
+            # For selfcal, we need to flag field-specific MS
+            # The path relative to spw would be: field/sc.ms
+            ms_rel = '/'.join(parts[1:])  # G71+28/sc.ms
             
-            script = f'''#!/usr/bin/env python3
-# Pre-imaging flagging {round_name} for {spw}/{field}
-import subprocess
-import os
-
-ms = '{ms_path}'
-
-# Catboss on DATA - sigma=5.0, combinations=1,2
-catboss_cmd = f"catboss --cat pooh {{ms}} --combinations 1,2 --sigma 5.0 --rho 1.5 --poly-degree 5 --deviation-threshold 3.0 --datacolumn DATA --apply-flags --max-threads {ppn} --max-memory-usage 0.8 --verbose"
-print(f"Running: {{catboss_cmd}}")
-subprocess.run(catboss_cmd, shell=True)
-
-# Nami on DATA - sigma=5.0, timebin in MINUTES
-nami_cmd = f"nami {{ms}} --datacolumn DATA --sigma 5.0 --nknots 3 --timebin 10 --ncpu {ppn}"
-print(f"Running: {{nami_cmd}}")
-subprocess.run(nami_cmd, shell=True)
-
-# Remove lock
-lock_file = os.path.join(ms, 'table.lock')
-if os.path.exists(lock_file):
-    os.remove(lock_file)
-
-print("Flagging complete")
-'''
-            
-            script_file = f"flag_{round_name}_{spw}_{field}.py"
-            with open(script_file, 'w') as f:
-                f.write(script)
-            
-            command = f"""cd {os.getcwd()}
-{preamble}
-python3 {script_file}
-"""
-            
-            job = hk.submit(
-                command=command,
-                name=f"flag_{round_name}_{spw}_{field}",
-                job_subdir=field_dir,
-                ppn=ppn,
-                walltime=resources.get('walltime', '02:00:00')
-            )
-            
-            if job.job_id:
-                job_ids.append(job.job_id)
-                job_map[job.job_id] = (field, spw, ms_path)
-                logger.info(f"Submitted flag {spw}/{field}: {job.job_id}")
-            
-            time.sleep(0.3)
+            if spw not in spw_ms_map:
+                spw_ms_map[spw] = []
+            if ms_rel not in spw_ms_map[spw]:
+                spw_ms_map[spw].append(ms_rel)
     
-    if not job_ids:
+    active_spws = list(spw_ms_map.keys())
+    
+    # Get list of MS names (should be same for all SPWs)
+    # e.g., ['G71+28/sc.ms'] or ['G71+28/pcal1.ms']
+    ms_names = list(spw_ms_map.values())[0] if spw_ms_map else []
+    
+    if not ms_names:
+        logger.warning("No MS files to flag")
         return ms_map
     
-    # Wait - housekeeper handles whitelist checking
-    logger.substep(f"Waiting for {len(job_ids)} flagging jobs...")
-    results = hk.wait_and_check(job_ids, whitelist=whitelist)
+    prev_spws = active_spws.copy()
     
-    # Build new ms_map based on results
-    new_ms_map = {field: [] for field in ms_map.keys()}
+    # Step 1: Catboss (GPU)
+    logger.substep(f"Catboss for {round_name}...")
+    result_spws = run_catboss(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        ms_names=ms_names,
+        stage='postcal',  # Use postcal settings (sigma=5, combinations=1,2,4,8)
+        datacolumn='DATA',
+        logger=logger,
+        whitelist=whitelist,
+        wait=True,
+        prefix=f'sc_{round_name}'
+    )
     
-    for job_id, (job, log_result) in results.items():
-        field, spw, ms_path = job_map.get(job_id, ('unknown', 'unknown', ''))
-        
-        if log_result.success:
-            logger.info(f"{spw}/{field}: OK")
-            new_ms_map[field].append(ms_path)
+    if result_spws is None:
+        logger.error("ALL SPWs failed catboss!")
+        return None
+    
+    # Check for failures
+    failed_spws = set(prev_spws) - set(result_spws)
+    if failed_spws:
+        if brotherhood:
+            logger.error(f"Brotherhood=True, catboss failed for: {failed_spws}, stopping!")
+            return None
         else:
-            logger.error(f"{spw}/{field}: FAILED")
-            if brotherhood:
-                logger.error("Brotherhood=True, stopping pipeline!")
-                return None
-            else:
-                logger.warning(f"Removing {spw}/{field}, continuing with remaining")
+            logger.warning(f"Catboss failed for {failed_spws}, continuing with {result_spws}")
     
-    # Remove empty fields
-    for field in list(new_ms_map.keys()):
-        if not new_ms_map[field]:
-            del new_ms_map[field]
+    active_spws = result_spws
+    prev_spws = active_spws.copy()
+    
+    # Step 2: Nami (CPU)
+    logger.substep(f"Nami for {round_name}...")
+    result_spws = run_nami(
+        hk=hk,
+        config=config,
+        active_spws=active_spws,
+        ms_names=ms_names,
+        datacolumn='DATA',
+        logger=logger,
+        whitelist=whitelist,
+        sigma=5.0,
+        prefix=f'sc_{round_name}'
+    )
+    
+    if result_spws is None:
+        logger.error("ALL SPWs failed nami!")
+        return None
+    
+    # Check for failures
+    failed_spws = set(prev_spws) - set(result_spws)
+    if failed_spws:
+        if brotherhood:
+            logger.error(f"Brotherhood=True, nami failed for: {failed_spws}, stopping!")
+            return None
+        else:
+            logger.warning(f"Nami failed for {failed_spws}, continuing with {result_spws}")
+    
+    # Build updated ms_map with only successful SPWs
+    new_ms_map = {}
+    for field, ms_list in ms_map.items():
+        new_list = []
+        for ms_path in ms_list:
+            spw = ms_path.split('/')[0]
+            if spw in result_spws:
+                new_list.append(ms_path)
+        if new_list:
+            new_ms_map[field] = new_list
     
     return new_ms_map if new_ms_map else None
 
@@ -323,7 +329,7 @@ print(f"SUCCESS: {round_name} complete")
                 logger.error("Brotherhood=True, stopping pipeline!")
                 return None
             else:
-                logger.warning(f"Removing {spw}/{field}, continuing with remaining")
+                logger.warning(f"Removing {spw}/{field}, continuing")
     
     # Remove empty fields
     for field in list(new_ms_map.keys()):
@@ -344,9 +350,10 @@ def run_selfcal_loop(hk: Housekeeper,
     Run full self-calibration loop.
     
     Flow per round:
-    1. Flag (catboss + nami on DATA)
-    2. Image (wsclean)
-    3. Calibrate (gaincal + bandpass + applycal + mstransform)
+    1. Catboss (GPU, parallel)
+    2. Nami (CPU, parallel)
+    3. Image (wsclean)
+    4. Calibrate (gaincal + bandpass + applycal + mstransform)
     """
     from .imaging import run_wsclean
     
@@ -387,8 +394,8 @@ def run_selfcal_loop(hk: Housekeeper,
         
         logger.substep(f"=== Phase cal round {round_num}/{phase_rounds} (solint={solint}, niter={niter}) ===")
         
-        # 1. Flag
-        ms_map = run_flag_ms(hk, config, ms_map, f'pcal{round_num}', logger, whitelist, brotherhood)
+        # 1. Flag (catboss + nami)
+        ms_map = run_selfcal_flagging(hk, config, ms_map, f'pcal{round_num}', logger, whitelist, brotherhood)
         if ms_map is None:
             return None
         
@@ -416,8 +423,8 @@ def run_selfcal_loop(hk: Housekeeper,
         
         logger.substep(f"=== Amp+phase cal round {round_num}/{ap_rounds} (solint={solint}, niter={niter}) ===")
         
-        # 1. Flag
-        ms_map = run_flag_ms(hk, config, ms_map, f'apcal{round_num}', logger, whitelist, brotherhood)
+        # 1. Flag (catboss + nami)
+        ms_map = run_selfcal_flagging(hk, config, ms_map, f'apcal{round_num}', logger, whitelist, brotherhood)
         if ms_map is None:
             return None
         
@@ -441,7 +448,7 @@ def run_selfcal_loop(hk: Housekeeper,
     final_niter = niter_sequence[min(round_idx, len(niter_sequence)-1)] * 2
     
     # Final flagging
-    ms_map = run_flag_ms(hk, config, ms_map, 'final', logger, whitelist, brotherhood)
+    ms_map = run_selfcal_flagging(hk, config, ms_map, 'final', logger, whitelist, brotherhood)
     if ms_map is None:
         return None
     
