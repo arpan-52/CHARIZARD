@@ -97,26 +97,7 @@ def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
         description="CHARIZARD - Radio Interferometry Calibration Pipeline",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Steps (in order):
-  analyze, split, badant, initial_flag, rfi_flag, refant,
-  cal1, postcal_flag, cal2, apply_targets, final_flag,
-  plotting, selfcal, ddcal
-
-Examples:
-  # Run full pipeline
-  charizard config.yaml
-  
-  # Run only DDCal (after selfcal is done)
-  charizard config.yaml --start ddcal
-  
-  # Run from calibration round 2 onwards
-  charizard config.yaml --start cal2
-  
-  # Run only selfcal
-  charizard config.yaml --start selfcal --end selfcal
-"""
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
     parser.add_argument(
@@ -132,24 +113,6 @@ Examples:
     parser.add_argument(
         "--models", "-m",
         help="User models file with custom polcal models (YAML)"
-    )
-    
-    parser.add_argument(
-        "--start",
-        choices=['analyze', 'split', 'badant', 'initial_flag', 'rfi_flag', 
-                 'refant', 'cal1', 'postcal_flag', 'cal2', 'apply_targets',
-                 'final_flag', 'plotting', 'selfcal', 'ddcal'],
-        default=None,
-        help="Start from this step (skip previous steps)"
-    )
-    
-    parser.add_argument(
-        "--end",
-        choices=['analyze', 'split', 'badant', 'initial_flag', 'rfi_flag',
-                 'refant', 'cal1', 'postcal_flag', 'cal2', 'apply_targets',
-                 'final_flag', 'plotting', 'selfcal', 'ddcal'],
-        default=None,
-        help="End at this step (skip later steps)"
     )
     
     return parser.parse_args()
@@ -174,22 +137,12 @@ def main():
     logger.info(f"MS: {config.ms_path}")
     logger.info(f"Working directory: {config.working_dir}")
     
-    if args.start:
-        logger.info(f"Starting from step: {args.start}")
-    if args.end:
-        logger.info(f"Ending at step: {args.end}")
-    
     # Scheduler config
     scheduler_config = args.scheduler_config
     
     # Run pipeline
     try:
-        success = charizard(
-            config, logger, scheduler_config, 
-            whitelist=ERROR_WHITELIST,
-            start_step=args.start,
-            end_step=args.end
-        )
+        success = charizard(config, logger, scheduler_config, whitelist=ERROR_WHITELIST)
     except KeyboardInterrupt:
         logger.warning("Pipeline interrupted by user")
         success = False

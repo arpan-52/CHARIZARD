@@ -18,6 +18,7 @@ Flow:
 10. Apply to both, final flagging
 11. Diagnostic plots (if requested)
 12. Imaging + Self-calibration (if configured)
+13. DDCal (if configured)
 """
 
 import os
@@ -39,48 +40,10 @@ from .utils.calibration_utils.gains import run_calibration
 from .utils.calibration_utils.applycal import run_applycal
 
 
-# Step order for --start and --end
-STEP_ORDER = [
-    'analyze', 'split', 'badant', 'initial_flag', 'rfi_flag',
-    'refant', 'cal1', 'postcal_flag', 'cal2', 'apply_targets',
-    'final_flag', 'plotting', 'selfcal', 'ddcal'
-]
-
-
-def should_run_step(step: str, start_step: Optional[str], end_step: Optional[str]) -> bool:
-    """Check if a step should run based on start/end parameters."""
-    if start_step is None and end_step is None:
-        return True
-    
-    step_idx = STEP_ORDER.index(step)
-    
-    if start_step:
-        start_idx = STEP_ORDER.index(start_step)
-        if step_idx < start_idx:
-            return False
-    
-    if end_step:
-        end_idx = STEP_ORDER.index(end_step)
-        if step_idx > end_idx:
-            return False
-    
-    return True
-
-
 def charizard(config, logger, scheduler_config: Optional[str] = None,
-              whitelist: List[str] = None,
-              start_step: Optional[str] = None,
-              end_step: Optional[str] = None) -> bool:
+              whitelist: List[str] = None) -> bool:
     """
     Run the full calibration pipeline.
-    
-    Args:
-        config: PipelineConfig
-        logger: PipelineLogger
-        scheduler_config: Path to scheduler config
-        whitelist: Error whitelist for log checking
-        start_step: Start from this step (skip earlier steps)
-        end_step: End at this step (skip later steps)
     
     Returns True ONLY if ALL requested steps completed successfully.
     """
@@ -113,18 +76,18 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     user_refant = calibration.get('refant')
     do_plotting = control.get('plot', False)
     
-    # Build list of requested steps (only those that will run)
+    # Build list of requested steps
     pipeline_status['all_steps_requested'] = [
-        s for s in ['analyze', 'split', 'badant', 'initial_flag', 
-                    'rfi_flag', 'refant', 'cal1', 'postcal_flag',
-                    'cal2', 'apply_targets', 'final_flag']
-        if should_run_step(s, start_step, end_step)
+        'analyze', 'split', 'badant', 'initial_flag', 
+        'rfi_flag', 'refant', 'cal1', 'postcal_flag',
+        'cal2', 'apply_targets', 'final_flag'
     ]
-                                               'cal2', 'apply_targets', 'final_flag']
     if do_plotting:
         pipeline_status['all_steps_requested'].append('plotting')
     if flow.get('imaging_selfcal'):
         pipeline_status['all_steps_requested'].append('selfcal')
+    if flow.get('dd_cal'):
+        pipeline_status['all_steps_requested'].append('ddcal')
     
     # =========================================================================
     # STEP 1: ANALYZE MS
@@ -750,7 +713,6 @@ python3 {script_file}
         from .utils.selfcal_utils.imaging import run_wsclean
         
         logger.step("DIRECTION-DEPENDENT CALIBRATION (PEELING)")
-        pipeline_status['all_steps_requested'].append('ddcal')
         
         ddcal_config = flow.get('dd_cal', {})
         source_finding = ddcal_config.get('source_finding', {})
