@@ -24,22 +24,22 @@ CATBOSS_DEFAULTS = {
         'deviation_threshold': 5.0,
     },
     'postcal': {
-        'combinations': '1,2',
-        'sigma': 6.0,
+        'combinations': '1,2,4,8',
+        'sigma': 5.0,
         'rho': 1.5,
         'poly_degree': 5,
         'deviation_threshold': 5.0,
     },
     'final': {
-        'combinations': '1,2,4',
-        'sigma': 6.0,
+        'combinations': '1,2,4,8',
+        'sigma': 5.0,
         'rho': 1.5,
         'poly_degree': 5,
         'deviation_threshold': 5.0,
     },
     'residual': {
-        'combinations': '1,2',
-        'sigma': 6.0,
+        'combinations': '1,2,4,8',
+        'sigma': 5.0,
         'rho': 1.5,
         'poly_degree': 5,
         'deviation_threshold': 5.0,
@@ -185,7 +185,7 @@ def run_catboss(hk: Housekeeper,
         # Return job IDs for parallel execution
         return job_ids
     
-    # Wait for jobs
+    # Wait for jobs - housekeeper handles whitelist
     logger.substep(f"Waiting for {len(job_ids)} catboss jobs...")
     results = hk.wait_and_check(job_ids, whitelist=whitelist)
     
@@ -200,6 +200,7 @@ def run_catboss(hk: Housekeeper,
             logger.info(f"{spw}: OK")
         else:
             failed.append(spw)
-            logger.warning(f"{spw}: FAILED (catboss)")
+            logger.error(f"{spw}: FAILED (catboss)")
     
+    # Return successful SPWs, or None if nothing succeeded
     return successful if successful else None

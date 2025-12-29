@@ -171,6 +171,24 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.success(f"Split complete. Active SPWs: {active_spws}")
     pipeline_status['completed_steps'].append('split')
     
+    # Write .calplan file for later use (selfcal reads this for Stokes imaging)
+    import yaml
+    calplan_data = {
+        'flux_cal': cal_plan.get('flux_cal'),
+        'phase_cal': cal_plan.get('phase_cal'),
+        'leakage_cal': cal_plan.get('leakage_cal'),
+        'polangle_cal': cal_plan.get('polangle_cal'),
+        'targets': cal_plan.get('targets', []),
+        'do_polcal': do_polcal,
+        'num_correlations': 4 if do_polcal else 2,
+        'correlation_names': ms_info.get('corr_names', []),
+        'active_spws': active_spws,
+        'refant': None,  # Will be updated after refant step
+    }
+    with open('.calplan', 'w') as f:
+        yaml.dump(calplan_data, f, default_flow_style=False)
+    logger.info("Wrote .calplan file")
+    
     # =========================================================================
     # STEP 3: BAD ANTENNA DETECTION
     # =========================================================================
@@ -207,6 +225,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.step("INITIAL FLAGGING")
     
     # Apply badants.txt to cal.ms
+    prev_spws = active_spws.copy()
     active_spws = run_initial_flagging(
         hk=hk,
         config=config,
@@ -219,9 +238,19 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     )
     
     if active_spws is None:
+        logger.error("ALL SPWs failed initial flagging!")
         pipeline_status['failed_steps'].append('initial_flag')
+        return False
+    
+    # Check if any SPWs failed
+    failed_spws = set(prev_spws) - set(active_spws)
+    if failed_spws:
         if brotherhood:
+            logger.error(f"Brotherhood=True, SPWs failed: {failed_spws}, stopping!")
+            pipeline_status['failed_steps'].append('initial_flag')
             return False
+        else:
+            logger.warning(f"Removed failed SPWs: {failed_spws}, continuing with: {active_spws}")
     
     # Apply source_flags.txt to src.ms
     if cal_plan['targets']:
@@ -244,6 +273,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     # =========================================================================
     logger.step("RFI FLAGGING - CALIBRATORS")
     
+    prev_spws = active_spws.copy()
     active_spws = run_catboss(
         hk=hk,
         config=config,
@@ -258,9 +288,19 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     )
     
     if active_spws is None:
+        logger.error("ALL SPWs failed RFI flagging!")
         pipeline_status['failed_steps'].append('rfi_flag')
+        return False
+    
+    # Check if any SPWs failed
+    failed_spws = set(prev_spws) - set(active_spws)
+    if failed_spws:
         if brotherhood:
+            logger.error(f"Brotherhood=True, SPWs failed: {failed_spws}, stopping!")
+            pipeline_status['failed_steps'].append('rfi_flag')
             return False
+        else:
+            logger.warning(f"Removed failed SPWs: {failed_spws}, continuing with: {active_spws}")
     
     logger.success("RFI flagging complete")
     pipeline_status['completed_steps'].append('rfi_flag')
@@ -290,6 +330,18 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     cal_plan['refant'] = refant
     logger.success(f"Refant: {refant}")
     pipeline_status['completed_steps'].append('refant')
+    
+    # Update .calplan with refant
+    try:
+        with open('.calplan', 'r') as f:
+            calplan_data = yaml.safe_load(f)
+        calplan_data['refant'] = refant
+        calplan_data['active_spws'] = active_spws
+        with open('.calplan', 'w') as f:
+            yaml.dump(calplan_data, f, default_flow_style=False)
+        logger.info("Updated .calplan with refant")
+    except Exception as e:
+        logger.warning(f"Could not update .calplan: {e}")
     
     # =========================================================================
     # STEP 7: CALIBRATION ROUND 1 + SOURCE FLAGGING (PARALLEL)
@@ -348,14 +400,18 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                         logger.error(f"  >> {err}")
         
         if failed_spws:
-            logger.warning(f"Calibration round 1 failed for: {failed_spws}")
-            pipeline_status['warnings'].append(f"Cal1 failed for {failed_spws}")
+            if brotherhood:
+                logger.error(f"Brotherhood=True, SPWs failed: {failed_spws}, stopping!")
+                pipeline_status['failed_steps'].append('cal1')
+                return False
+            else:
+                logger.warning(f"Removing failed SPWs: {failed_spws}, continuing with: {successful}")
+                active_spws = successful
         
-        if not successful and brotherhood:
+        if not successful:
+            logger.error("ALL SPWs failed calibration!")
             pipeline_status['failed_steps'].append('cal1')
             return False
-        
-        active_spws = successful if successful else active_spws
     
     # Apply to calibrators
     active_spws = run_applycal(
@@ -411,6 +467,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     # =========================================================================
     logger.step("CALIBRATION ROUND 2")
     
+    prev_spws = active_spws.copy()
     active_spws = run_calibration(
         hk=hk,
         config=config,
@@ -424,9 +481,19 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     )
     
     if active_spws is None:
+        logger.error("ALL SPWs failed calibration round 2!")
         pipeline_status['failed_steps'].append('cal2')
+        return False
+    
+    # Check if any SPWs failed
+    failed_spws = set(prev_spws) - set(active_spws)
+    if failed_spws:
         if brotherhood:
+            logger.error(f"Brotherhood=True, SPWs failed: {failed_spws}, stopping!")
+            pipeline_status['failed_steps'].append('cal2')
             return False
+        else:
+            logger.warning(f"Removed failed SPWs: {failed_spws}, continuing with: {active_spws}")
     
     # Apply to calibrators
     run_applycal(
