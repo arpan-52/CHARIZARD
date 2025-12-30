@@ -247,7 +247,6 @@ bandpass(
     refant='{refant}',
     minsnr=3.0,
     gaintable=['{caltable_g}'],
-    solnorm={solnorm}
 )
 
 # Check bandpass
