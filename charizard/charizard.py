@@ -655,84 +655,66 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             if not selfcal_brotherhood:
                 return False
         else:
-            # Initial flagging on selfcal MS
+            # Initial flagging on selfcal MS - use proper catboss (GPU) + nami (CPU)
             if selfcal_config.get('avg_flag', True):
                 logger.substep("Initial flagging on selfcal MS...")
                 
-                env = config.environment
-                preamble = env.get('shell_preamble', '')
-                resources = config.resources.get('flagging', config.resources.get('default', {}))
-                ppn = resources.get('ppn', 8)
-                
-                flag_jobs = []
-                flag_job_map = {}
-                
+                # Convert ms_map to format for run_catboss/run_nami
+                # ms_map: {field: [spw0/field/sc.ms, spw1/field/sc.ms, ...]}
+                # Need: active_spws = [spw0, spw1, ...], ms_names = [field/sc.ms]
+                spw_ms_map = {}
                 for field, ms_list in ms_map.items():
                     for ms_path in ms_list:
-                        spw = ms_path.split('/')[0]
-                        field_dir = f"{spw}/{field}"
-                        
-                        script = f'''#!/usr/bin/env python3
-import subprocess
-import os
-
-ms = '{ms_path}'
-
-# Catboss initial - sigma 6.0, combinations 1,2
-cmd = f"catboss --cat pooh {{ms}} --combinations 1,2 --sigma 6.0 --rho 1.5 --poly-degree 5 --deviation-threshold 3.0 --datacolumn DATA --apply-flags --max-threads {ppn} --max-memory-usage 0.8 --verbose"
-print(f"Running: {{cmd}}")
-result = subprocess.run(cmd, shell=True)
-if result.returncode != 0:
-    print(f"WARNING: Catboss exited with code {{result.returncode}}")
-
-# Remove lock
-lock_file = os.path.join(ms, 'table.lock')
-if os.path.exists(lock_file):
-    os.remove(lock_file)
-
-print("Initial flagging complete")
-'''
-                        script_file = f"scflag_{spw}_{field}.py"
-                        with open(script_file, 'w') as f:
-                            f.write(script)
-                        
-                        command = f"""cd {os.getcwd()}
-{preamble}
-python3 {script_file}
-"""
-                        job = hk.submit(
-                            command=command,
-                            name=f"scflag_{spw}_{field}",
-                            job_subdir=field_dir,
-                            ppn=ppn,
-                            walltime=resources.get('walltime', '02:00:00')
-                        )
-                        
-                        if job.job_id:
-                            flag_jobs.append(job.job_id)
-                            flag_job_map[job.job_id] = (field, spw)
-                        
-                        time.sleep(0.3)
+                        parts = ms_path.split('/')
+                        spw = parts[0]
+                        ms_rel = '/'.join(parts[1:])  # field/sc.ms
+                        if spw not in spw_ms_map:
+                            spw_ms_map[spw] = []
+                        if ms_rel not in spw_ms_map[spw]:
+                            spw_ms_map[spw].append(ms_rel)
                 
-                if flag_jobs:
-                    logger.substep(f"Waiting for {len(flag_jobs)} initial flagging jobs...")
-                    results = hk.wait_and_check(flag_jobs, whitelist=whitelist)
+                active_spws_sc = list(spw_ms_map.keys())
+                ms_names_sc = list(spw_ms_map.values())[0] if spw_ms_map else []
+                
+                if ms_names_sc:
+                    # Catboss (GPU)
+                    logger.substep("Running catboss on selfcal MS...")
+                    result_spws = run_catboss(
+                        hk=hk,
+                        config=config,
+                        active_spws=active_spws_sc,
+                        ms_names=ms_names_sc,
+                        stage='initial',
+                        datacolumn='DATA',
+                        logger=logger,
+                        whitelist=whitelist,
+                        wait=True,
+                        prefix='sc_init'
+                    )
                     
-                    flag_ok = 0
-                    flag_fail = 0
-                    for job_id, (job, log_result) in results.items():
-                        field, spw = flag_job_map.get(job_id, ('unknown', 'unknown'))
-                        if log_result.success:
-                            flag_ok += 1
-                            logger.info(f"{spw}/{field}: OK")
-                        else:
-                            flag_fail += 1
-                            logger.warning(f"{spw}/{field}: flagging had issues")
-                            if log_result.error_lines:
-                                for err in log_result.error_lines[:2]:
-                                    logger.error(f"  >> {err}")
+                    if result_spws is None:
+                        logger.warning("Catboss failed on all SPWs")
+                    else:
+                        active_spws_sc = result_spws
                     
-                    logger.info(f"Initial flagging: {flag_ok} OK, {flag_fail} had issues")
+                    # Nami (CPU)
+                    logger.substep("Running nami on selfcal MS...")
+                    result_spws = run_nami(
+                        hk=hk,
+                        config=config,
+                        active_spws=active_spws_sc,
+                        ms_names=ms_names_sc,
+                        datacolumn='DATA',
+                        logger=logger,
+                        whitelist=whitelist,
+                        sigma=5.0,
+                        prefix='sc_init'
+                    )
+                    
+                    if result_spws is None:
+                        logger.warning("Nami failed on all SPWs")
+                    
+                    logger.info("Initial selfcal flagging complete")
             
             # Dirty image if requested
             if flow.get('imaging_selfcal', {}).get('dirty_image', False):
