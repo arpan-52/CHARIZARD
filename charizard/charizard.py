@@ -866,7 +866,8 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                                 flux_threshold_mJy=flux_threshold,
                                 eps_factor=eps_factor,
                                 min_samples=min_samples,
-                                mask_radius_factor=mask_radius_factor
+                                mask_radius_factor=mask_radius_factor,
+                                logger=logger
                             )
                             
                             if not sources:
@@ -877,7 +878,9 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                             
                             # Create all-sources region file
                             region_file = f"ddcal_output/{field}/peel_sources.reg"
-                            create_ds9_regions(sources, region_file)
+                            create_ds9_regions(sources, region_file, 
+                                               beam_maj=sources[0].get('region_radius_arcsec', 6.0) / mask_radius_factor,
+                                               mask_radius_factor=mask_radius_factor)
                             logger.info(f"Created region file: {region_file}")
                             
                             # Get source list file from final imaging
