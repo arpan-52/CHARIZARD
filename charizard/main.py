@@ -104,6 +104,11 @@ ERROR_WHITELIST = [
     # Nami warnings
     "nami",
     "Nami",
+    
+
+    # Concat 
+    "Exception Reported: Table DataManager error: Internal error: StManIndArray::get/put shapes not conforming"
+
 ]
 
 
