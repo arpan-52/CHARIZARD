@@ -1,21 +1,20 @@
 # charizard/utils/ddcal_utils/__init__.py
 """
-Direction-Dependent Calibration (DDCal) utilities.
-- MS concatenation
-- PyBDSF source finding
-- Artifact detection
-- Sequential peeling
+Direction-Dependent Calibration utilities.
 """
 
-from .concat import concat_ms
 from .pybdsf_runner import run_pybdsf
-from .artifact_detector import detect_artifacts, create_ds9_regions
+from .source_matcher import (
+    load_pybdsf_catalog,
+    find_bright_sources_and_write_regions
+)
 from .peeling import run_peeling_loop
+from .concat import concat_ms
 
 __all__ = [
-    'concat_ms',
     'run_pybdsf',
-    'detect_artifacts',
-    'create_ds9_regions',
+    'load_pybdsf_catalog',
+    'find_bright_sources_and_write_regions',
     'run_peeling_loop',
+    'concat_ms',
 ]
