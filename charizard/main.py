@@ -92,6 +92,7 @@ ERROR_WHITELIST = [
     "Warning: Model component",
     "No MODEL_DATA column found",
     "Creating MODEL_DATA column",
+    "NumbaDeprecationWarning: numba.generated_jit is deprecated"
     
     # General computation warnings
     "divide by zero encountered",
