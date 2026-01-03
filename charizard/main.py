@@ -108,7 +108,9 @@ ERROR_WHITELIST = [
     
 
     # Concat 
-    "Exception Reported: Table DataManager error: Internal error: StManIndArray::get/put shapes not conforming"
+    "Exception Reported: Table DataManager error: Internal error: StManIndArray::get/put shapes not conforming",
+    "RuntimeWarning: Number of calls to function has reached maxfev = 1400.",
+    "p, success = leastsq(errorfunction, p_ini)"
 
 ]
 
