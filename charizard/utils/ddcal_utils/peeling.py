@@ -88,6 +88,9 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+micromamba activate quartical
+
+
 # Step 2: QuartiCal - solve and subtract
 echo "Running QuartiCal..."
 goquartical \\
