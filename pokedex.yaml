@@ -49,5 +49,5 @@ flow:
       min_samples: 3
       mask_radius_factor: 2.5
     peeling:
-      time_interval: 60
+      time_interval: 120s
       freq_interval: 10

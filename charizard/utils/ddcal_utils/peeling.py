@@ -52,6 +52,11 @@ def run_peeling_loop(hk: Housekeeper,
     
     output_dir = f"ddcal_output/{field}"
     os.makedirs(output_dir, exist_ok=True)
+
+    ddcal_config = config.flow.get('dd_cal', {})
+    peeling_config = ddcal_config.get('peeling', {})
+    time_interval = peeling_config.get('time_interval', '120s')
+    freq_interval = peeling_config.get('freq_interval', 10)
     
     current_data_col = "DATA"
     
@@ -107,8 +112,8 @@ goquartical \\
     output.products=[corrected_residual] \\
     output.columns=[{output_col}] \\
     G.type=diag_complex \\
-    G.time_interval=1 \\
-    G.freq_interval=0
+    G.time_interval={time_interval} \\
+    G.freq_interval={freq_interval}
 
 if [ $? -ne 0 ]; then
     echo "ERROR: QuartiCal failed"
