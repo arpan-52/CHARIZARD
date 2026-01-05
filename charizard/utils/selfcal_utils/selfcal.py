@@ -40,6 +40,15 @@ def get_niter_sequence(start_iters: int, total_rounds: int) -> List[int]:
     return sequence
 
 
+def get_threshold_sequence(start_threshold: float, total_rounds: int) -> List[float]:
+    """Generate threshold sequence. Decreases by 1.5x each round."""
+    sequence = []
+    current = start_threshold
+    for i in range(total_rounds):
+        sequence.append(current)
+        current = current / 1.5
+    return sequence
+
 def run_selfcal_flagging(hk: Housekeeper,
                          config,
                          ms_map: Dict[str, List[str]],

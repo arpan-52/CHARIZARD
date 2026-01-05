@@ -73,35 +73,6 @@ output_ms = '{output_ms}'
 # First concat all
 concat(vis=vis_list, concatvis=output_ms)
 
-# Now split to keep only parallel hands
-# Check what correlations we have
-tb.open(output_ms + '/POLARIZATION')
-corr_types = tb.getcol('CORR_TYPE')[0]
-tb.close()
-
-# Determine parallel hands
-# 5,6,7,8 = RR,RL,LR,LL (circular)
-# 9,10,11,12 = XX,XY,YX,YY (linear)
-if 5 in corr_types:  # Circular
-    correlation = 'RR,LL'
-elif 9 in corr_types:  # Linear
-    correlation = 'XX,YY'
-else:
-    correlation = ''  # Keep all
-
-if correlation:
-    temp_ms = output_ms + '.temp'
-    os.rename(output_ms, temp_ms)
-    
-    split(vis=temp_ms,
-          outputvis=output_ms,
-          datacolumn='data',
-          correlation=correlation)
-    
-    import shutil
-    shutil.rmtree(temp_ms)
-    print(f"Split to parallel hands: {{correlation}}")
-
 print(f"Combined MS: {{output_ms}}")
 '''
         

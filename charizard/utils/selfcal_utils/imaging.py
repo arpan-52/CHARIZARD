@@ -16,7 +16,7 @@ def build_wsclean_command(ms_list: List[str],
                           cellsize: str,
                           niter: int,
                           datacolumn: str = 'DATA',
-                          threshold: float = 0.001,
+                          threshold: float = 0.0001,
                           use_mask: bool = False,
                           mask_path: str = None,
                           stokes: str = 'I',
@@ -58,6 +58,7 @@ def build_wsclean_command(ms_list: List[str],
     -mgain 0.7 \\
     -join-channels \\
     -multiscale \\
+    -no-negative \\
     -multiscale-scale-bias 0.6 \\
     -fit-spectral-pol 3 \\
     -fit-beam \\

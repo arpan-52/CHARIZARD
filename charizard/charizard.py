@@ -761,7 +761,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             load_pybdsf_catalog,
             find_bright_sources_and_write_regions
         )
-        from .utils.ddcal_utils.peeling import run_peeling_loop
+        from .utils.ddcal_utils.peeling import run_ddcal_peeling
         
         logger.step("DIRECTION-DEPENDENT CALIBRATION (PEELING)")
         
@@ -770,13 +770,6 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         
         flux_threshold = source_finding.get('flux_threshold_mJy', 50)
         region_radius = source_finding.get('region_radius_arcsec', 15.0)
-        
-        # Get imaging params
-        selfcal_config = flow.get('imaging_selfcal', {}).get('selfcal', {})
-        imaging_config = selfcal_config.get('imaging', {})
-        imsize = imaging_config.get('imsize', 4096)
-        cellsize_str = imaging_config.get('cellsize', '1asec')
-        cellsize = float(cellsize_str.replace('asec', '').replace('arcsec', '').replace('"', ''))
         
         logger.info(f"Flux threshold: {flux_threshold} mJy")
         logger.info(f"Region radius: {region_radius} arcsec")
@@ -790,14 +783,26 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             selfcal_ms_map = None
         
         if selfcal_ms_map:
-            # Step 1: Concat MS
+            # Check .calplan for correlations
+            num_corrs = 2
+            try:
+                if os.path.exists('.calplan'):
+                    with open('.calplan', 'r') as f:
+                        calplan = yaml.safe_load(f)
+                    num_corrs = calplan.get('num_correlations', 2)
+                    logger.info(f"Read .calplan: {num_corrs} correlations")
+            except Exception as e:
+                logger.warning(f"Could not read .calplan: {e}")
+            
+            # Step 1: Concat MS (no split if 2 corrs)
             logger.substep("Concatenating MS files...")
             combined_ms_map = concat_ms(
                 hk=hk,
                 config=config,
                 ms_map=selfcal_ms_map,
                 logger=logger,
-                whitelist=whitelist
+                whitelist=whitelist,
+                split=(num_corrs == 4)  # Only split if 4 correlations
             )
             
             if not combined_ms_map:
@@ -830,7 +835,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                         logger.error("PyBDSF failed")
                         pipeline_status['failed_steps'].append('ddcal')
                     else:
-                        # Step 3: Find bright sources and write region files
+                        # Step 3: Find bright sources and create region files
                         for field in combined_ms_map.keys():
                             if field not in pybdsf_results:
                                 logger.warning(f"No PyBDSF results for {field}")
@@ -838,13 +843,11 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                             
                             logger.substep(f"Processing field {field}...")
                             
-                            # Load PyBDSF catalog
                             pybdsf_df = load_pybdsf_catalog(
                                 pybdsf_results[field]['catalog'],
                                 logger=logger
                             )
                             
-                            # Find bright sources and write region files
                             output_dir = f"ddcal_output/{field}"
                             region_files = find_bright_sources_and_write_regions(
                                 pybdsf_df=pybdsf_df,
@@ -860,11 +863,11 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                             
                             logger.info(f"{field}: {len(region_files)} sources to peel")
                             
-                            # Get source list file from final imaging
+                            # Get source list file
                             source_list_file = f"images/{field}/final_I_{field}-sources.txt"
                             
-                            # Step 4: Sequential peeling
-                            final_column = run_peeling_loop(
+                            # Step 4: Run DDCal peeling
+                            final_image = run_ddcal_peeling(
                                 hk=hk,
                                 config=config,
                                 field=field,
@@ -875,56 +878,10 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                                 whitelist=whitelist
                             )
                             
-                            if final_column:
-                                # Step 5: Final peeled image
-                                logger.substep(f"Creating final peeled image for {field}...")
-                                
-                                peeled_image_script = f'''#!/bin/bash
-cd {os.getcwd()}
-{config.environment.get('shell_preamble', '')}
-
-wsclean \\
-    -name ddcal_output/{field}/peeled_{field} \\
-    -weight briggs 0.0 \\
-    -super-weight 1.0 \\
-    -size {imsize} {imsize} \\
-    -scale {cellsize}asec \\
-    -channels-out 4 \\
-    -pol I \\
-    -data-column {final_column} \\
-    -niter 50000 \\
-    -auto-mask 7 \\
-    -auto-threshold 3 \\
-    -gain 0.1 \\
-    -mgain 0.7 \\
-    -join-channels \\
-    -multiscale \\
-    -multiscale-scale-bias 0.6 \\
-    -fit-spectral-pol 3 \\
-    -fit-beam \\
-    -padding 1.3 \\
-    {combined_ms_map[field]}
-'''
-                                script_file = f"wsclean_peeled_{field}.sh"
-                                with open(script_file, 'w') as f:
-                                    f.write(peeled_image_script)
-                                os.chmod(script_file, 0o755)
-                                
-                                job = hk.submit(
-                                    command=f"bash {os.getcwd()}/{script_file}",
-                                    name=f"wsclean_peeled_{field}",
-                                    job_subdir=f"ddcal_output/{field}",
-                                    ppn=config.resources.get('imaging', {}).get('ppn', 8),
-                                    walltime='04:00:00'
-                                )
-                                
-                                if job.job_id:
-                                    results = hk.wait_and_check([job.job_id], whitelist=whitelist)
-                                    for jid, (j, log_result) in results.items():
-                                        if log_result.success:
-                                            logger.success(f"{field}: Peeled image complete!")
-                                        else:
-                                            logger.warning(f"{field}: Peeled imaging had issues")
+                            if final_image:
+                                logger.success(f"{field}: DDCal complete!")
+                            else:
+                                logger.error(f"{field}: DDCal failed")
                         
                         pipeline_status['completed_steps'].append('ddcal')
                         logger.success("DDCal complete!")

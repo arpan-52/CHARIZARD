@@ -1,294 +1,7 @@
-# # charizard/utils/ddcal_utils/peeling.py
-# """
-# Sequential peeling loop using CrystalBall + QuartiCal (G + dE).
-# Processes each region file one by one.
-
-# For each source:
-# 1. CrystalBall: predict source model into unique column
-# 2. QuartiCal: solve G + dE and subtract direction
-# """
-
-# import os
-# import time
-# from typing import List, Optional
-
-# from housekeeper import Housekeeper
-
-
-# def run_crystalball_for_regions(hk: Housekeeper,
-#                                  config,
-#                                  field: str,
-#                                  region_files: List[str],
-#                                  source_list_file: str,
-#                                  ms_path: str,
-#                                  logger,
-#                                  whitelist: List[str]) -> Optional[List[str]]:
-#     """
-#     Run CrystalBall for each region file to create MODEL columns.
-#     Runs in parallel - one job per region.
-    
-#     Returns:
-#         List of MODEL column names, or None if failed
-#     """
-#     logger.substep(f"Running CrystalBall for {len(region_files)} regions...")
-    
-#     env = config.environment
-#     preamble = env.get('shell_preamble', '')
-#     resources = config.resources.get('ddcal', config.resources.get('default', {}))
-#     ppn = resources.get('ppn', 8)
-    
-#     output_dir = f"ddcal_output/{field}"
-#     os.makedirs(output_dir, exist_ok=True)
-    
-#     job_ids = []
-#     job_map = {}  # job_id -> (source_num, model_col)
-#     model_columns = []
-    
-#     for i, region_file in enumerate(region_files):
-#         source_num = i + 1
-#         model_col = f"MODEL_SOURCE_{source_num}"
-#         model_columns.append(model_col)
-        
-#         script = f"""#!/bin/bash
-# cd {os.getcwd()}
-# {preamble}
-
-# echo "=== CrystalBall for source {source_num} ==="
-# echo "Region file: {region_file}"
-# echo "Output column: {model_col}"
-
-# crystalball {ms_path} \\
-#     -sm {source_list_file} \\
-#     -w {region_file} \\
-#     -o {model_col} \\
-#     -j {ppn}
-
-# if [ $? -ne 0 ]; then
-#     echo "ERROR: CrystalBall failed for source {source_num}"
-#     exit 1
-# fi
-
-# echo "SUCCESS: CrystalBall source {source_num} -> {model_col}"
-# """
-        
-#         script_file = f"crystalball_{field}_{source_num}.sh"
-#         with open(script_file, 'w') as f:
-#             f.write(script)
-#         os.chmod(script_file, 0o755)
-        
-#         job = hk.submit(
-#             command=f"bash {os.getcwd()}/{script_file}",
-#             name=f"crystalball_{field}_{source_num}",
-#             job_subdir=output_dir,
-#             ppn=ppn,
-#             walltime=resources.get('walltime', '01:00:00')
-#         )
-        
-#         if job.job_id:
-#             job_ids.append(job.job_id)
-#             job_map[job.job_id] = (source_num, model_col)
-#             logger.info(f"Submitted CrystalBall {source_num}: {job.job_id}")
-        
-#         time.sleep(0.3)
-    
-#     if not job_ids:
-#         logger.error("No CrystalBall jobs submitted")
-#         return None
-    
-#     # Wait for all CrystalBall jobs (parallel)
-#     logger.substep(f"Waiting for {len(job_ids)} CrystalBall jobs...")
-#     results = hk.wait_and_check(job_ids, whitelist=whitelist)
-    
-#     # Check results
-#     failed = []
-#     for job_id, (job, log_result) in results.items():
-#         source_num, model_col = job_map.get(job_id, (0, ''))
-#         if log_result.success:
-#             logger.info(f"CrystalBall source {source_num}: OK -> {model_col}")
-#         else:
-#             logger.error(f"CrystalBall source {source_num}: FAILED")
-#             if log_result.error_lines:
-#                 for err in log_result.error_lines[:3]:
-#                     logger.error(f"  >> {err}")
-#             failed.append(source_num)
-    
-#     if failed:
-#         logger.error(f"CrystalBall failed for sources: {failed}")
-#         return None
-    
-#     return model_columns
-
-
-# def run_peeling_loop(hk: Housekeeper,
-#                      config,
-#                      field: str,
-#                      region_files: List[str],
-#                      source_list_file: str,
-#                      ms_path: str,
-#                      logger,
-#                      whitelist: List[str]) -> Optional[str]:
-#     """
-#     Run sequential peeling using CrystalBall + QuartiCal (G + dE).
-    
-#     1. Run CrystalBall for all regions (parallel) -> MODEL_SOURCE_N columns
-#     2. Run QuartiCal sequentially for each source (G + dE, subtract)
-    
-#     Returns:
-#         Final data column name after peeling, or None if failed
-#     """
-#     if not region_files:
-#         logger.info(f"{field}: No region files to peel")
-#         return None
-    
-#     logger.substep(f"Peeling {len(region_files)} sources for {field}...")
-    
-#     # Step 1: Run CrystalBall for all regions (parallel)
-#     model_columns = run_crystalball_for_regions(
-#         hk=hk,
-#         config=config,
-#         field=field,
-#         region_files=region_files,
-#         source_list_file=source_list_file,
-#         ms_path=ms_path,
-#         logger=logger,
-#         whitelist=whitelist
-#     )
-    
-#     if not model_columns:
-#         logger.error("CrystalBall failed")
-#         return None
-    
-#     # Step 2: Run QuartiCal sequentially for each source
-#     env = config.environment
-#     preamble = env.get('shell_preamble', '')
-#     resources = config.resources.get('ddcal', config.resources.get('default', {}))
-#     ppn = resources.get('ppn', 8)
-    
-#     # Get peeling config
-#     ddcal_config = config.flow.get('dd_cal', {})
-#     peeling_config = ddcal_config.get('peeling', {})
-#     g_time_interval = peeling_config.get('g_time_interval', '10s')
-#     g_freq_interval = peeling_config.get('g_freq_interval', 10)
-#     de_time_interval = peeling_config.get('de_time_interval', '100s')
-#     de_freq_interval = peeling_config.get('de_freq_interval', 100)
-#     time_chunk = peeling_config.get('time_chunk', '300s')
-    
-#     output_dir = f"ddcal_output/{field}"
-    
-#     current_data_col = "DATA"
-    
-#     for i, model_col in enumerate(model_columns):
-#         source_num = i + 1
-        
-#         logger.info(f"Peeling source {source_num}/{len(model_columns)}")
-#         logger.info(f"  Input column: {current_data_col}")
-#         logger.info(f"  Model column: {model_col}")
-        
-#         # Output column for this peel
-#         output_col = f"PEELED_{source_num}_DATA"
-        
-#         # QuartiCal recipe: DATA~MODEL:MODEL means solve against MODEL, subtract MODEL
-#         # input_model.recipe=CURRENT_DATA~MODEL_COL:MODEL_COL
-#         recipe = f"{current_data_col}~{model_col}:{model_col}"
-        
-#         script = f"""#!/bin/bash
-# cd {os.getcwd()}
-# {preamble}
-
-# echo "=== QuartiCal Peeling source {source_num}/{len(model_columns)} ==="
-# echo "Input column: {current_data_col}"
-# echo "Model column: {model_col}"
-# echo "Output column: {output_col}"
-# echo "Recipe: {recipe}"
-
-# micromamba activate quartical
-
-# goquartical \\
-#     input_ms.path={ms_path} \\
-#     input_ms.data_column={current_data_col} \\
-#     input_ms.time_chunk={time_chunk} \\
-#     input_ms.freq_chunk=0 \\
-#     input_model.recipe={recipe} \\
-#     solver.terms=[G,dE] \\
-#     solver.iter_recipe=[25,25,10,10] \\
-#     output.gain_directory={output_dir}/gains_peel_{source_num} \\
-#     output.log_directory={output_dir}/logs_peel_{source_num} \\
-#     output.overwrite=True \\
-#     output.products=[corrected_residual] \\
-#     output.columns=[{output_col}] \\
-#     output.subtract_directions=[1] \\
-#     G.type=diag_complex \\
-#     G.time_interval={g_time_interval} \\
-#     G.freq_interval={g_freq_interval} \\
-#     dE.type=complex \\
-#     dE.time_interval={de_time_interval} \\
-#     dE.freq_interval={de_freq_interval} \\
-#     dE.direction_dependent=True
-
-# if [ $? -ne 0 ]; then
-#     echo "ERROR: QuartiCal failed for source {source_num}"
-#     exit 1
-# fi
-
-# echo "SUCCESS: Peeled source {source_num} -> {output_col}"
-# """
-        
-#         script_file = f"quartical_peel_{field}_{source_num}.sh"
-#         with open(script_file, 'w') as f:
-#             f.write(script)
-#         os.chmod(script_file, 0o755)
-        
-#         job = hk.submit(
-#             command=f"bash {os.getcwd()}/{script_file}",
-#             name=f"quartical_peel_{field}_{source_num}",
-#             job_subdir=output_dir,
-#             ppn=ppn,
-#             walltime=resources.get('walltime', '02:00:00')
-#         )
-        
-#         if not job.job_id:
-#             logger.error(f"Failed to submit QuartiCal job for source {source_num}")
-#             return None
-        
-#         logger.info(f"Submitted QuartiCal peel job: {job.job_id}")
-        
-#         # Wait for this peel to complete before next (sequential!)
-#         results = hk.wait_and_check([job.job_id], whitelist=whitelist)
-        
-#         job_result = results.get(job.job_id)
-#         if job_result:
-#             job_obj, log_result = job_result
-#             if not log_result.success:
-#                 logger.error(f"QuartiCal peel source {source_num} FAILED")
-#                 if log_result.error_lines:
-#                     for err in log_result.error_lines[:3]:
-#                         logger.error(f"  >> {err}")
-#                 return None
-        
-#         logger.info(f"Peeled source {source_num}: OK -> {output_col}")
-        
-#         # Update data column for next iteration
-#         current_data_col = output_col
-        
-#         time.sleep(1)
-    
-#     logger.success(f"Peeling complete for {field}. Final column: {current_data_col}")
-#     return current_data_col
-
-
-
-
-
-
-
-
-
 # charizard/utils/ddcal_utils/peeling.py
 """
-Sequential peeling loop using CrystalBall + QuartiCal (G + dE).
-
-1. CrystalBall: one job, runs all regions sequentially (avoid MS locking)
-2. QuartiCal: sequential jobs, one per source (G + dE, subtract)
+DDCal peeling using CrystalBall + QuartiCal (G + dE).
+Peels all sources in one go.
 """
 
 import os
@@ -298,56 +11,92 @@ from typing import List, Optional
 from housekeeper import Housekeeper
 
 
-def run_crystalball_for_regions(hk: Housekeeper,
-                                 config,
-                                 field: str,
-                                 region_files: List[str],
-                                 source_list_file: str,
-                                 ms_path: str,
-                                 logger,
-                                 whitelist: List[str]) -> Optional[List[str]]:
+def run_ddcal_peeling(hk: Housekeeper,
+                      config,
+                      field: str,
+                      region_files: List[str],
+                      source_list_file: str,
+                      ms_path: str,
+                      logger,
+                      whitelist: List[str]) -> Optional[str]:
     """
-    Run CrystalBall for all regions in a single job (sequential).
-    Avoids MS locking issues.
+    Run DDCal peeling: CrystalBall + QuartiCal + Final Image.
+    
+    1. CrystalBall: load all sources -> MODEL_DATA, then each peel source -> MODEL_SOURCE_N
+    2. QuartiCal: peel all sources in one go with G + dE
+    3. WSClean: final image on PEELED_DATA
     
     Returns:
-        List of MODEL column names, or None if failed
+        Path to final image, or None if failed
     """
-    logger.substep(f"Running CrystalBall for {len(region_files)} regions...")
+    if not region_files:
+        logger.info(f"{field}: No sources to peel")
+        return None
+    
+    num_sources = len(region_files)
+    logger.substep(f"DDCal peeling {num_sources} sources for {field}...")
     
     env = config.environment
     preamble = env.get('shell_preamble', '')
     resources = config.resources.get('ddcal', config.resources.get('default', {}))
     ppn = resources.get('ppn', 8)
     
+    # Get peeling config
+    ddcal_config = config.flow.get('dd_cal', {})
+    peeling_config = ddcal_config.get('peeling', {})
+    g_time_interval = peeling_config.get('g_time_interval', '120s')
+    g_freq_interval = peeling_config.get('g_freq_interval', '10MHz')
+    de_time_interval = peeling_config.get('de_time_interval', '120s')
+    de_freq_interval = peeling_config.get('de_freq_interval', '10MHz')
+    
+    # Get imaging config
+    selfcal_config = config.flow.get('imaging_selfcal', {}).get('selfcal', {})
+    imaging_config = selfcal_config.get('imaging', {})
+    imsize = imaging_config.get('imsize', 4096)
+    cellsize = imaging_config.get('cellsize', '1asec')
+    niter = ddcal_config.get('final_niter', 50000)
+    
     output_dir = f"ddcal_output/{field}"
     os.makedirs(output_dir, exist_ok=True)
     
-    # Build list of model columns
-    model_columns = [f"MODEL_SOURCE_{i+1}" for i in range(len(region_files))]
+    # Build model column names
+    model_columns = [f"MODEL_SOURCE_{i+1}" for i in range(num_sources)]
     
-    # Build single script with all CrystalBall commands
-    script_lines = [
+    # =========================================================================
+    # STEP 1: CrystalBall - one job, all sources
+    # =========================================================================
+    logger.substep("Running CrystalBall...")
+    
+    cb_lines = [
         f"#!/bin/bash",
         f"cd {os.getcwd()}",
         f"{preamble}",
         f"",
-        f"echo '=== CrystalBall for {len(region_files)} sources ==='",
-        f"echo 'MS: {ms_path}'",
-        f"echo 'Source list: {source_list_file}'",
+        f"echo '=== CrystalBall for {field} ==='",
+        f"",
+        f"# First: load ALL sources into MODEL_DATA",
+        f"echo 'Loading all sources -> MODEL_DATA'",
+        f"crystalball {ms_path} \\",
+        f"    -sm {source_list_file} \\",
+        f"    -o MODEL_DATA \\",
+        f"    -j {ppn}",
+        f"",
+        f"if [ $? -ne 0 ]; then",
+        f"    echo 'ERROR: CrystalBall failed for MODEL_DATA'",
+        f"    exit 1",
+        f"fi",
+        f"echo 'SUCCESS: MODEL_DATA created'",
         f"",
     ]
     
+    # Then: each peel source
     for i, region_file in enumerate(region_files):
         source_num = i + 1
         model_col = model_columns[i]
         
-        script_lines.extend([
-            f"echo ''",
-            f"echo '--- Source {source_num}/{len(region_files)} ---'",
-            f"echo 'Region: {region_file}'",
-            f"echo 'Output column: {model_col}'",
-            f"",
+        cb_lines.extend([
+            f"# Source {source_num}: {region_file} -> {model_col}",
+            f"echo 'Source {source_num} -> {model_col}'",
             f"crystalball {ms_path} \\",
             f"    -sm {source_list_file} \\",
             f"    -w {region_file} \\",
@@ -355,26 +104,24 @@ def run_crystalball_for_regions(hk: Housekeeper,
             f"    -j {ppn}",
             f"",
             f"if [ $? -ne 0 ]; then",
-            f"    echo 'ERROR: CrystalBall failed for source {source_num}'",
+            f"    echo 'ERROR: CrystalBall failed for {model_col}'",
             f"    exit 1",
             f"fi",
-            f"echo 'SUCCESS: Source {source_num} -> {model_col}'",
+            f"echo 'SUCCESS: {model_col} created'",
             f"",
         ])
     
-    script_lines.append(f"echo 'All CrystalBall jobs complete!'")
+    cb_lines.append(f"echo 'All CrystalBall complete!'")
     
-    script = '\n'.join(script_lines)
+    cb_script = '\n'.join(cb_lines)
+    cb_script_file = f"crystalball_{field}.sh"
+    with open(cb_script_file, 'w') as f:
+        f.write(cb_script)
+    os.chmod(cb_script_file, 0o755)
     
-    script_file = f"crystalball_all_{field}.sh"
-    with open(script_file, 'w') as f:
-        f.write(script)
-    os.chmod(script_file, 0o755)
-    
-    # Submit single job
     job = hk.submit(
-        command=f"bash {os.getcwd()}/{script_file}",
-        name=f"crystalball_all_{field}",
+        command=f"bash {os.getcwd()}/{cb_script_file}",
+        name=f"crystalball_{field}",
         job_subdir=output_dir,
         ppn=ppn,
         walltime=resources.get('walltime', '02:00:00')
@@ -386,120 +133,56 @@ def run_crystalball_for_regions(hk: Housekeeper,
     
     logger.info(f"Submitted CrystalBall job: {job.job_id}")
     
-    # Wait for job
     results = hk.wait_and_check([job.job_id], whitelist=whitelist)
-    
     job_result = results.get(job.job_id)
     if job_result:
         job_obj, log_result = job_result
         if not log_result.success:
-            logger.error("CrystalBall job FAILED")
+            logger.error("CrystalBall FAILED")
             if log_result.error_lines:
                 for err in log_result.error_lines[:5]:
                     logger.error(f"  >> {err}")
             return None
     
-    logger.info(f"CrystalBall complete: {len(model_columns)} model columns created")
-    return model_columns
-
-
-def run_peeling_loop(hk: Housekeeper,
-                     config,
-                     field: str,
-                     region_files: List[str],
-                     source_list_file: str,
-                     ms_path: str,
-                     logger,
-                     whitelist: List[str]) -> Optional[str]:
-    """
-    Run sequential peeling using CrystalBall + QuartiCal (G + dE).
+    logger.info("CrystalBall complete")
     
-    1. Run CrystalBall for all regions (single job, sequential)
-    2. Run QuartiCal sequentially for each source (G + dE, subtract)
+    # =========================================================================
+    # STEP 2: QuartiCal - peel all sources in one go
+    # =========================================================================
+    logger.substep("Running QuartiCal peeling...")
     
-    Returns:
-        Final data column name after peeling, or None if failed
-    """
-    if not region_files:
-        logger.info(f"{field}: No region files to peel")
-        return None
+    # Build recipe: MODEL_DATA~MODEL_SOURCE_1~MODEL_SOURCE_2:MODEL_SOURCE_1:MODEL_SOURCE_2
+    model_parts = '~'.join(model_columns)
+    direction_parts = ':'.join(model_columns)
+    recipe = f"MODEL_DATA~{model_parts}:{direction_parts}"
     
-    logger.substep(f"Peeling {len(region_files)} sources for {field}...")
+    # Build subtract_directions: [1,2,3,...]
+    subtract_dirs = ','.join([str(i+1) for i in range(num_sources)])
     
-    # Step 1: Run CrystalBall for all regions (single job)
-    model_columns = run_crystalball_for_regions(
-        hk=hk,
-        config=config,
-        field=field,
-        region_files=region_files,
-        source_list_file=source_list_file,
-        ms_path=ms_path,
-        logger=logger,
-        whitelist=whitelist
-    )
-    
-    if not model_columns:
-        logger.error("CrystalBall failed")
-        return None
-    
-    # Step 2: Run QuartiCal sequentially for each source
-    env = config.environment
-    preamble = env.get('shell_preamble', '')
-    resources = config.resources.get('ddcal', config.resources.get('default', {}))
-    ppn = resources.get('ppn', 8)
-    
-    # Get peeling config
-    ddcal_config = config.flow.get('dd_cal', {})
-    peeling_config = ddcal_config.get('peeling', {})
-    g_time_interval = peeling_config.get('g_time_interval', '10s')
-    g_freq_interval = peeling_config.get('g_freq_interval', 10)
-    de_time_interval = peeling_config.get('de_time_interval', '100s')
-    de_freq_interval = peeling_config.get('de_freq_interval', 100)
-    time_chunk = peeling_config.get('time_chunk', '300s')
-    
-    output_dir = f"ddcal_output/{field}"
-    
-    current_data_col = "DATA"
-    
-    for i, model_col in enumerate(model_columns):
-        source_num = i + 1
-        
-        logger.info(f"Peeling source {source_num}/{len(model_columns)}")
-        logger.info(f"  Input column: {current_data_col}")
-        logger.info(f"  Model column: {model_col}")
-        
-        # Output column for this peel
-        output_col = f"PEELED_{source_num}_DATA"
-        
-        # QuartiCal recipe
-        recipe = f"{current_data_col}~{model_col}:{model_col}"
-        
-        script = f"""#!/bin/bash
+    qc_script = f"""#!/bin/bash
 cd {os.getcwd()}
 {preamble}
 
-echo "=== QuartiCal Peeling source {source_num}/{len(model_columns)} ==="
-echo "Input column: {current_data_col}"
-echo "Model column: {model_col}"
-echo "Output column: {output_col}"
+echo "=== QuartiCal Peeling for {field} ==="
 echo "Recipe: {recipe}"
+echo "Subtract directions: [{subtract_dirs}]"
 
 micromamba activate quartical
 
 goquartical \\
     input_ms.path={ms_path} \\
-    input_ms.data_column={current_data_col} \\
-    input_ms.time_chunk={time_chunk} \\
+    input_ms.data_column=DATA \\
+    input_ms.time_chunk=0 \\
     input_ms.freq_chunk=0 \\
     input_model.recipe={recipe} \\
     solver.terms=[G,dE] \\
     solver.iter_recipe=[25,25,10,10] \\
-    output.gain_directory={output_dir}/gains_peel_{source_num} \\
-    output.log_directory={output_dir}/logs_peel_{source_num} \\
+    output.gain_directory={output_dir}/gains_peel \\
+    output.log_directory={output_dir}/logs_peel \\
     output.overwrite=True \\
     output.products=[corrected_residual] \\
-    output.columns=[{output_col}] \\
-    output.subtract_directions=[1] \\
+    output.columns=[PEELED_DATA] \\
+    output.subtract_directions=[{subtract_dirs}] \\
     G.type=diag_complex \\
     G.time_interval={g_time_interval} \\
     G.freq_interval={g_freq_interval} \\
@@ -509,51 +192,123 @@ goquartical \\
     dE.direction_dependent=True
 
 if [ $? -ne 0 ]; then
-    echo "ERROR: QuartiCal failed for source {source_num}"
+    echo "ERROR: QuartiCal failed"
     exit 1
 fi
 
-echo "SUCCESS: Peeled source {source_num} -> {output_col}"
+echo "SUCCESS: QuartiCal peeling complete -> PEELED_DATA"
 """
-        
-        script_file = f"quartical_peel_{field}_{source_num}.sh"
-        with open(script_file, 'w') as f:
-            f.write(script)
-        os.chmod(script_file, 0o755)
-        
-        job = hk.submit(
-            command=f"bash {os.getcwd()}/{script_file}",
-            name=f"quartical_peel_{field}_{source_num}",
-            job_subdir=output_dir,
-            ppn=ppn,
-            walltime=resources.get('walltime', '02:00:00')
-        )
-        
-        if not job.job_id:
-            logger.error(f"Failed to submit QuartiCal job for source {source_num}")
-            return None
-        
-        logger.info(f"Submitted QuartiCal peel job: {job.job_id}")
-        
-        # Wait for this peel to complete before next (sequential!)
-        results = hk.wait_and_check([job.job_id], whitelist=whitelist)
-        
-        job_result = results.get(job.job_id)
-        if job_result:
-            job_obj, log_result = job_result
-            if not log_result.success:
-                logger.error(f"QuartiCal peel source {source_num} FAILED")
-                if log_result.error_lines:
-                    for err in log_result.error_lines[:3]:
-                        logger.error(f"  >> {err}")
-                return None
-        
-        logger.info(f"Peeled source {source_num}: OK -> {output_col}")
-        
-        # Update data column for next iteration
-        current_data_col = output_col
-        
-        time.sleep(1)
     
-    logger.success(f"Peeling complete for {field}. Final column: {current_data_col}")
-    return current_data_col
+    qc_script_file = f"quartical_peel_{field}.sh"
+    with open(qc_script_file, 'w') as f:
+        f.write(qc_script)
+    os.chmod(qc_script_file, 0o755)
+    
+    job = hk.submit(
+        command=f"bash {os.getcwd()}/{qc_script_file}",
+        name=f"quartical_peel_{field}",
+        job_subdir=output_dir,
+        ppn=ppn,
+        walltime=resources.get('walltime', '04:00:00')
+    )
+    
+    if not job.job_id:
+        logger.error("Failed to submit QuartiCal job")
+        return None
+    
+    logger.info(f"Submitted QuartiCal job: {job.job_id}")
+    
+    results = hk.wait_and_check([job.job_id], whitelist=whitelist)
+    job_result = results.get(job.job_id)
+    if job_result:
+        job_obj, log_result = job_result
+        if not log_result.success:
+            logger.error("QuartiCal FAILED")
+            if log_result.error_lines:
+                for err in log_result.error_lines[:5]:
+                    logger.error(f"  >> {err}")
+            return None
+    
+    logger.info("QuartiCal peeling complete")
+    
+    # =========================================================================
+    # STEP 3: Final WSClean image
+    # =========================================================================
+    logger.substep("Running final WSClean image...")
+    
+    image_prefix = f"{output_dir}/peeled_{field}"
+    
+    ws_script = f"""#!/bin/bash
+cd {os.getcwd()}
+{preamble}
+
+echo "=== Final WSClean for {field} ==="
+echo "Data column: PEELED_DATA"
+
+wsclean \\
+    -name {image_prefix} \\
+    -size {imsize} {imsize} \\
+    -scale {cellsize} \\
+    -channels-out 4 \\
+    -pol I \\
+    -intervals-out 1 \\
+    -data-column PEELED_DATA \\
+    -niter 50000 \\
+    -auto-mask 7 \\
+    -auto-threshold 3 \\
+    -gain 0.1 \\
+    -mgain 0.7 \\
+    -weight briggs 0.0 \\
+    -join-channels \\
+    -multiscale \\
+    -no-negative \\
+    -multiscale-scale-bias 0.6 \\
+    -fit-spectral-pol 3 \\
+    -fit-beam \\
+    -elliptical-beam \\
+    -padding 1.3 \\
+    -parallel-deconvolution 8192 \\
+    -save-source-list \\
+    {ms_path}
+
+if [ ! -f "{image_prefix}-MFS-image.fits" ]; then
+    echo "ERROR: WSClean failed - no output image"
+    exit 1
+fi
+
+echo "SUCCESS: Final image created"
+"""
+    
+    ws_script_file = f"wsclean_peeled_{field}.sh"
+    with open(ws_script_file, 'w') as f:
+        f.write(ws_script)
+    os.chmod(ws_script_file, 0o755)
+    
+    job = hk.submit(
+        command=f"bash {os.getcwd()}/{ws_script_file}",
+        name=f"wsclean_peeled_{field}",
+        job_subdir=output_dir,
+        ppn=config.resources.get('imaging', {}).get('ppn', 8),
+        walltime='04:00:00'
+    )
+    
+    if not job.job_id:
+        logger.error("Failed to submit WSClean job")
+        return None
+    
+    logger.info(f"Submitted WSClean job: {job.job_id}")
+    
+    results = hk.wait_and_check([job.job_id], whitelist=whitelist)
+    job_result = results.get(job.job_id)
+    if job_result:
+        job_obj, log_result = job_result
+        if not log_result.success:
+            logger.error("WSClean FAILED")
+            if log_result.error_lines:
+                for err in log_result.error_lines[:5]:
+                    logger.error(f"  >> {err}")
+            return None
+    
+    final_image = f"{image_prefix}-MFS-image.fits"
+    logger.success(f"DDCal complete! Final image: {final_image}")
+    return final_image
