@@ -801,9 +801,8 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                 config=config,
                 ms_map=selfcal_ms_map,
                 logger=logger,
-                whitelist=whitelist,
-                split=(num_corrs == 4)  # Only split if 4 correlations
-            )
+                whitelist=whitelist)  # Only split if 4 correlations
+            
             
             if not combined_ms_map:
                 logger.error("MS concatenation failed")
