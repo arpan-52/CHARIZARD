@@ -195,7 +195,7 @@ goquartical \\
     K.solve_per=antenna \\
     K.direction_dependent=False \\
     K.pinned_directions=[0] \\
-    K.time_interval=8 \\
+    K.time_interval=120 \\
     K.freq_interval=0 \\
     K.load_from=None \\
     K.interp_mode=reim \\
