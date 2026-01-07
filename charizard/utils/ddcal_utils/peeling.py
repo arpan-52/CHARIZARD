@@ -175,8 +175,8 @@ goquartical \\
     input_ms.time_chunk=0 \\
     input_ms.freq_chunk=0 \\
     input_model.recipe={recipe} \\
-    solver.terms=[G,dE] \\
-    solver.iter_recipe=[25,25,10,10] \\
+    solver.terms=[K,G,dE] \\
+    solver.iter_recipe=[50,50,50,50,50,50,50,50,50,50] \\
     output.gain_directory={output_dir}/gains_peel \\
     output.log_directory={output_dir}/logs_peel \\
     output.overwrite=True \\
@@ -190,6 +190,19 @@ goquartical \\
     dE.time_interval={de_time_interval} \\
     dE.freq_interval={de_freq_interval} \\
     dE.direction_dependent=True
+    G.direction_dependent=False \\
+    K.type=delay_and_offset \\
+    K.solve_per=antenna \\
+    K.direction_dependent=False \\
+    K.pinned_directions=[0] \\
+    K.time_interval=8 \\
+    K.freq_interval=0 \\
+    K.load_from=None \\
+    K.interp_mode=reim \\
+    K.interp_method=2dlinear \\
+    K.respect_scan_boundaries=True \\
+    K.initial_estimate=False
+
 
 if [ $? -ne 0 ]; then
     echo "ERROR: QuartiCal failed"
