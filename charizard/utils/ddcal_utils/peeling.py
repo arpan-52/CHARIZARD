@@ -189,7 +189,7 @@ goquartical \\
     dE.type=complex \\
     dE.time_interval={de_time_interval} \\
     dE.freq_interval={de_freq_interval} \\
-    dE.direction_dependent=True
+    dE.direction_dependent=True \\
     G.direction_dependent=False \\
     K.type=delay_and_offset \\
     K.solve_per=antenna \\
