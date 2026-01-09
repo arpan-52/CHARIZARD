@@ -183,7 +183,7 @@ goquartical \\
     output.products=[corrected_residual] \\
     output.columns=[PEELED_DATA] \\
     output.subtract_directions=[{subtract_dirs}] \\
-    G.type=diag_complex \\
+    G.type=complex \\
     G.time_interval={g_time_interval} \\
     G.freq_interval={g_freq_interval} \\
     dE.type=complex \\
@@ -197,7 +197,6 @@ goquartical \\
     K.pinned_directions=[0] \\
     K.time_interval=120 \\
     K.freq_interval=0 \\
-    K.load_from=None \\
     K.interp_mode=reim \\
     K.interp_method=2dlinear \\
     K.respect_scan_boundaries=True \\
