@@ -175,7 +175,7 @@ goquartical \\
     input_ms.time_chunk=0 \\
     input_ms.freq_chunk=0 \\
     input_model.recipe={recipe} \\
-    solver.terms=[K,G,dE] \\
+    solver.terms=[K,dE] \\
     solver.iter_recipe=[50,50,50,50,50,50,50,50,50,50] \\
     output.gain_directory={output_dir}/gains_peel \\
     output.log_directory={output_dir}/logs_peel \\
