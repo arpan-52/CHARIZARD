@@ -169,6 +169,41 @@ echo "Subtract directions: [{subtract_dirs}]"
 
 micromamba activate quartical
 
+# goquartical \\
+#     input_ms.path={ms_path} \\
+#     input_ms.data_column=DATA \\
+#     input_ms.time_chunk=0 \\
+#     input_ms.freq_chunk=0 \\
+#     input_model.recipe={recipe} \\
+#     solver.terms=[K,dE] \\
+#     solver.iter_recipe=[50,50,50,50,50,50,50,50,50,50] \\
+#     output.gain_directory={output_dir}/gains_peel \\
+#     output.log_directory={output_dir}/logs_peel \\
+#     output.overwrite=True \\
+#     output.products=[corrected_residual] \\
+#     output.columns=[PEELED_DATA] \\
+#     output.subtract_directions=[{subtract_dirs}] \\
+#     G.type=complex \\
+#     G.time_interval={g_time_interval} \\
+#     G.freq_interval={g_freq_interval} \\
+#     dE.type=complex \\
+#     dE.time_interval={de_time_interval} \\
+#     dE.freq_interval={de_freq_interval} \\
+#     dE.direction_dependent=True \\
+#     G.direction_dependent=False \\
+#     K.type=delay_and_offset \\
+#     K.solve_per=antenna \\
+#     K.direction_dependent=False \\
+#     K.pinned_directions=[0] \\
+#     K.time_interval=120 \\
+#     K.freq_interval=0 \\
+#     K.interp_mode=reim \\
+#     K.interp_method=2dlinear \\
+#     K.respect_scan_boundaries=True \\
+#     K.initial_estimate=False
+
+
+
 goquartical \\
     input_ms.path={ms_path} \\
     input_ms.data_column=DATA \\
@@ -183,14 +218,10 @@ goquartical \\
     output.products=[corrected_residual] \\
     output.columns=[PEELED_DATA] \\
     output.subtract_directions=[{subtract_dirs}] \\
-    G.type=complex \\
-    G.time_interval={g_time_interval} \\
-    G.freq_interval={g_freq_interval} \\
     dE.type=complex \\
     dE.time_interval={de_time_interval} \\
     dE.freq_interval={de_freq_interval} \\
     dE.direction_dependent=True \\
-    G.direction_dependent=False \\
     K.type=delay_and_offset \\
     K.solve_per=antenna \\
     K.direction_dependent=False \\
@@ -201,6 +232,7 @@ goquartical \\
     K.interp_method=2dlinear \\
     K.respect_scan_boundaries=True \\
     K.initial_estimate=False
+
 
 
 if [ $? -ne 0 ]; then
