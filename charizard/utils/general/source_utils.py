@@ -280,11 +280,16 @@ def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
         
         phase_override = overrides.get('phase')
         if phase_override:
-            cal_plan['phase_cal'] = phase_override
+            if isinstance(phase_override, list):
+                cal_plan['phase_cal'] = ",".join(phase_override)
+            else:
+                cal_plan['phase_cal'] = phase_override
             logger.info(f"User override phase cal: {cal_plan['phase_cal']}")
         
         leakage_override = overrides.get('leakage')
         if leakage_override:
+            if isinstance(leakage_override, list):
+                leakage_override = ",".join(leakage_override)
             # Only add if it's actually in the MS
             if leakage_override in ms_field_names:
                 cal_plan['leakage_cal'] = leakage_override
@@ -294,12 +299,22 @@ def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
         
         polangle_override = overrides.get('pol_angle')
         if polangle_override:
+            if isinstance(polangle_override, list):
+                polangle_override = ",".join(polangle_override)
             # Only add if it's actually in the MS
             if polangle_override in ms_field_names:
                 cal_plan['polangle_cal'] = polangle_override
                 logger.info(f"User override pol angle cal: {cal_plan['polangle_cal']}")
             else:
                 logger.warning(f"Pol angle cal {polangle_override} not in MS fields!")
+        
+        targets_override = overrides.get('targets')
+        if targets_override:
+            if isinstance(targets_override, list):
+                targets = targets_override
+            else:
+                targets = [t.strip() for t in targets_override.split(',')]
+            logger.info(f"User override targets: {targets}")
     
     # UV range overrides
     if uvrange_overrides:
