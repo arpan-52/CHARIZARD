@@ -21,28 +21,28 @@ CATBOSS_DEFAULTS = {
         'sigma': 6.0,
         'rho': 1.5,
         'poly_degree': 5,
-        'deviation_threshold': 3.0,
+        'deviation_threshold': 5.0,
     },
     'postcal': {
         'combinations': '1,2,4,8',
         'sigma': 5.0,
         'rho': 1.5,
         'poly_degree': 5,
-        'deviation_threshold': 3.0,
+        'deviation_threshold': 5.0,
     },
     'final': {
         'combinations': '1,2,4,8',
         'sigma': 5.0,
         'rho': 1.5,
         'poly_degree': 5,
-        'deviation_threshold': 3.0,
+        'deviation_threshold': 5.0,
     },
     'residual': {
         'combinations': '1,2,4,8',
         'sigma': 5.0,
         'rho': 1.5,
         'poly_degree': 5,
-        'deviation_threshold': 3.0,
+        'deviation_threshold': 5.0,
     }
 }
 
@@ -75,6 +75,7 @@ def build_catboss_command(ms_path: str,
     cmd += f" --deviation-threshold {defaults['deviation_threshold']}"
     cmd += f" --datacolumn {datacolumn}"
     cmd += f" --apply-flags"
+    cmd += f" --propagate-flags"
     cmd += f" --max-threads {max_threads}"
     cmd += f" --max-memory-usage {max_memory}"
     cmd += f" --verbose"
