@@ -34,16 +34,42 @@ class CalibratorMatcher:
     def __init__(self, xml_path: Optional[str] = None, user_models: Optional[Dict] = None, logger=None):
         self.logger = logger
         self.calibrators = []
+        self.internal_models = {}
         self.user_models = user_models or {}
         
+        # Data directory for internal files
+        data_dir = Path(__file__).parent.parent.parent / "data"
+        
+        # Load internal models FIRST (defaults)
+        internal_models_path = data_dir / "internal_models.yaml"
+        if os.path.exists(internal_models_path):
+            self._load_internal_models(str(internal_models_path))
+        elif logger:
+            logger.warning(f"Internal models not found: {internal_models_path}")
+        
+        # Load VLA calibrator XML catalog
         if xml_path is None:
-            data_dir = Path(__file__).parent.parent.parent / "data"
             xml_path = data_dir / "vla_calibrators.xml"
         
         if os.path.exists(xml_path):
             self._load_xml_catalog(str(xml_path))
         elif logger:
             logger.warning(f"Calibrator XML not found: {xml_path}")
+    
+    def _load_internal_models(self, yaml_path: str):
+        """Load internal calibrator models from YAML."""
+        try:
+            with open(yaml_path, 'r') as f:
+                self.internal_models = yaml.safe_load(f) or {}
+            if self.logger:
+                polcal_count = len(self.internal_models.get('polcal_models', {}))
+                unpol_count = len(self.internal_models.get('known_unpolarized', {}))
+                pol_count = len(self.internal_models.get('known_polarized', {}))
+                self.logger.info(f"Loaded internal models: {polcal_count} polcal, {unpol_count} unpolarized, {pol_count} polarized")
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Error loading internal models: {e}")
+            self.internal_models = {}
     
     def parse_ra_dec(self, ra_str: str, dec_str: str):
         """Parse RA/DEC strings"""
@@ -167,32 +193,85 @@ class CalibratorMatcher:
                 return f">{uvmin}klambda"
         return None
     
-    def get_user_polcal_model(self, source_name: str) -> Optional[Dict]:
-        """Get polcal model from user models by name.
+    def get_polcal_model(self, source_name: str) -> Optional[Dict]:
+        """Get polcal model for a source.
         
-        Checks multiple possible locations in user models:
-        - full_stokes.<source_name>
-        - polcal_models.<source_name>
-        - <source_name> directly
+        Checks internal models first, then user models can override.
+        
+        Search order:
+        1. User models (override): full_stokes.<name>, polcal_models.<name>, <name>
+        2. Internal models: polcal_models.<name>
         """
-        if not self.user_models:
-            return None
+        # Check user models first (they override internal)
+        if self.user_models:
+            # Try full_stokes first
+            full_stokes = self.user_models.get('full_stokes', {})
+            if source_name in full_stokes:
+                return full_stokes[source_name]
+            
+            # Try polcal_models
+            polcal_models = self.user_models.get('polcal_models', {})
+            if source_name in polcal_models:
+                return polcal_models[source_name]
+            
+            # Try direct
+            if source_name in self.user_models:
+                return self.user_models[source_name]
         
-        # Try full_stokes first
-        full_stokes = self.user_models.get('full_stokes', {})
-        if source_name in full_stokes:
-            return full_stokes[source_name]
-        
-        # Try polcal_models
-        polcal_models = self.user_models.get('polcal_models', {})
-        if source_name in polcal_models:
-            return polcal_models[source_name]
-        
-        # Try direct
-        if source_name in self.user_models:
-            return self.user_models[source_name]
+        # Fall back to internal models
+        if self.internal_models:
+            polcal_models = self.internal_models.get('polcal_models', {})
+            if source_name in polcal_models:
+                return polcal_models[source_name]
         
         return None
+    
+    def is_known_unpolarized(self, source_name: str) -> bool:
+        """Check if source is in known_unpolarized list."""
+        # Check user models first
+        if self.user_models:
+            known_unpol = self.user_models.get('known_unpolarized', {})
+            if source_name in known_unpol:
+                return True
+        
+        # Check internal models
+        if self.internal_models:
+            known_unpol = self.internal_models.get('known_unpolarized', {})
+            if source_name in known_unpol:
+                return True
+        
+        return False
+    
+    def is_known_polarized(self, source_name: str) -> bool:
+        """Check if source is in known_polarized list."""
+        # Check user models first
+        if self.user_models:
+            known_pol = self.user_models.get('known_polarized', {})
+            if source_name in known_pol:
+                return True
+        
+        # Check internal models
+        if self.internal_models:
+            known_pol = self.internal_models.get('known_polarized', {})
+            if source_name in known_pol:
+                return True
+        
+        return False
+    
+    def get_leakage_cal_status(self, source_name: str) -> str:
+        """Get polarization status of leakage calibrator.
+        
+        Returns:
+            'unpolarized' - source is in known_unpolarized
+            'polarized' - source is in known_polarized  
+            'assumed_unpolarized' - source not in either list, assuming unpolarized
+        """
+        if self.is_known_unpolarized(source_name):
+            return 'unpolarized'
+        elif self.is_known_polarized(source_name):
+            return 'polarized'
+        else:
+            return 'assumed_unpolarized'
 
 
 def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
@@ -354,12 +433,25 @@ def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
     cal_plan['targets'] = [t for t in targets if t not in all_cals]
     
     # =========================================================================
-    # POLCAL MODELS (from user models)
+    # POLCAL MODELS (from internal + user models)
     # =========================================================================
     for cal in cal_plan['all_calibrators']:
-        model = matcher.get_user_polcal_model(cal)
+        model = matcher.get_polcal_model(cal)
         if model:
             cal_plan['polcal_models'][cal] = model
-            logger.info(f"User polcal model found for {cal}")
+            logger.info(f"Polcal model found for {cal}")
+    
+    # =========================================================================
+    # LEAKAGE CALIBRATOR STATUS
+    # =========================================================================
+    if cal_plan['leakage_cal']:
+        leakage_status = matcher.get_leakage_cal_status(cal_plan['leakage_cal'])
+        cal_plan['leakage_cal_status'] = leakage_status
+        if leakage_status == 'unpolarized':
+            logger.info(f"Leakage cal {cal_plan['leakage_cal']}: known unpolarized source")
+        elif leakage_status == 'polarized':
+            logger.info(f"Leakage cal {cal_plan['leakage_cal']}: known polarized source")
+        else:
+            logger.info(f"Leakage cal {cal_plan['leakage_cal']}: assuming unpolarized (not in catalog)")
     
     return cal_plan

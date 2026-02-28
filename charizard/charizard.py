@@ -171,13 +171,15 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.success(f"Split complete. Active SPWs: {active_spws}")
     pipeline_status['completed_steps'].append('split')
     
-    # Write .calplan file for later use (selfcal reads this for Stokes imaging)
+    # Write calplan file for later use (selfcal reads this for Stokes imaging)
     import yaml
+    calplan_file = f"{config.ms_name}.calplan"
     calplan_data = {
         'flux_cal': cal_plan.get('flux_cal'),
         'phase_cal': cal_plan.get('phase_cal'),
         'leakage_cal': cal_plan.get('leakage_cal'),
         'polangle_cal': cal_plan.get('polangle_cal'),
+        'leakage_cal_status': cal_plan.get('leakage_cal_status', 'unknown'),
         'targets': cal_plan.get('targets', []),
         'do_polcal': do_polcal,
         'num_correlations': 4 if do_polcal else 2,
@@ -185,9 +187,9 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         'active_spws': active_spws,
         'refant': None,  # Will be updated after refant step
     }
-    with open('.calplan', 'w') as f:
+    with open(calplan_file, 'w') as f:
         yaml.dump(calplan_data, f, default_flow_style=False)
-    logger.info("Wrote .calplan file")
+    logger.info(f"Wrote {calplan_file}")
     
     # =========================================================================
     # STEP 3: BAD ANTENNA DETECTION
@@ -331,17 +333,18 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     logger.success(f"Refant: {refant}")
     pipeline_status['completed_steps'].append('refant')
     
-    # Update .calplan with refant
+    # Update calplan with refant
     try:
-        with open('.calplan', 'r') as f:
+        calplan_file = f"{config.ms_name}.calplan"
+        with open(calplan_file, 'r') as f:
             calplan_data = yaml.safe_load(f)
         calplan_data['refant'] = refant
         calplan_data['active_spws'] = active_spws
-        with open('.calplan', 'w') as f:
+        with open(calplan_file, 'w') as f:
             yaml.dump(calplan_data, f, default_flow_style=False)
-        logger.info("Updated .calplan with refant")
+        logger.info(f"Updated {calplan_file} with refant")
     except Exception as e:
-        logger.warning(f"Could not update .calplan: {e}")
+        logger.warning(f"Could not update {calplan_file}: {e}")
     
     # =========================================================================
     # STEP 7: CALIBRATION ROUND 1 + SOURCE FLAGGING (PARALLEL)
@@ -783,16 +786,17 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             selfcal_ms_map = None
         
         if selfcal_ms_map:
-            # Check .calplan for correlations
+            # Check calplan for correlations
+            calplan_file = f"{config.ms_name}.calplan"
             num_corrs = 2
             try:
-                if os.path.exists('.calplan'):
-                    with open('.calplan', 'r') as f:
+                if os.path.exists(calplan_file):
+                    with open(calplan_file, 'r') as f:
                         calplan = yaml.safe_load(f)
                     num_corrs = calplan.get('num_correlations', 2)
-                    logger.info(f"Read .calplan: {num_corrs} correlations")
+                    logger.info(f"Read {calplan_file}: {num_corrs} correlations")
             except Exception as e:
-                logger.warning(f"Could not read .calplan: {e}")
+                logger.warning(f"Could not read {calplan_file}: {e}")
             
             # Step 1: Concat MS (no split if 2 corrs)
             logger.substep("Concatenating MS files...")

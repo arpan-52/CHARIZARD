@@ -460,16 +460,17 @@ def run_selfcal_loop(hk: Housekeeper,
     if ms_map is None:
         return None
     
-    # Read .calplan for Stokes
+    # Read calplan for Stokes
+    calplan_file = f"{config.ms_name}.calplan"
     num_corrs = 2
     try:
-        if os.path.exists('.calplan'):
-            with open('.calplan', 'r') as f:
+        if os.path.exists(calplan_file):
+            with open(calplan_file, 'r') as f:
                 calplan = yaml.safe_load(f)
             num_corrs = calplan.get('num_correlations', 2)
-            logger.info(f"Read .calplan: {num_corrs} correlations")
+            logger.info(f"Read {calplan_file}: {num_corrs} correlations")
     except Exception as e:
-        logger.warning(f"Could not read .calplan: {e}")
+        logger.warning(f"Could not read {calplan_file}: {e}")
     
     if num_corrs >= 4:
         stokes_list = ['I', 'Q', 'U', 'V']
