@@ -135,7 +135,7 @@ def run_selfcal_flagging(hk: Housekeeper,
         datacolumn='DATA',
         logger=logger,
         whitelist=whitelist,
-        sigma=5.0,
+        sigma=20.0,
         prefix=f'sc_{round_name}'
     )
     
