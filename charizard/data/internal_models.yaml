@@ -1,0 +1,80 @@
+# charizard/data/internal_models.yaml
+# Internal calibrator models with RA/DEC for position matching
+# Position matching is preferred over name matching (2 arcsec threshold)
+
+# Standard CASA flux calibrators (setjy knows these)
+casa_flux_cals:
+  - 3C286
+  - 3C48
+  - 3C147
+  - 3C138
+
+# Known unpolarized sources (good for leakage calibration)
+known_unpolarized:
+  3C84:
+    ra: "03h19m48.16s"
+    dec: "+41d30m42.1s"
+    names: ["3C84", "0319+415", "J0319+4130", "Perseus A"]
+    notes: "Unpolarized, good for leakage, variable"
+  
+  OQ208:
+    ra: "14h07m00.39s"
+    dec: "+28d27m14.7s"
+    names: ["OQ208", "1404+286", "J1407+2827"]
+    notes: "Unpolarized, stable"
+  
+  3C147:
+    ra: "05h42m36.14s"
+    dec: "+49d51m07.2s"
+    names: ["3C147", "0542+498", "J0542+4951"]
+    notes: "Unpolarized, flux calibrator"
+
+# Known polarized sources
+known_polarized:
+  3C286:
+    ra: "13h31m08.29s"
+    dec: "+30d30m32.9s"
+    names: ["3C286", "1331+305", "J1331+3030"]
+    notes: "Highly polarized (~10%), standard pol angle calibrator"
+  
+  3C138:
+    ra: "05h21m09.89s"
+    dec: "+16d38m22.1s"
+    names: ["3C138", "0521+166", "J0521+1638"]
+    notes: "Polarized but VARIABLE, use with caution"
+
+# Full Stokes polarization models for polcal
+# Required for polarization angle calibration
+polcal_models:
+  3C286:
+    ra: "13h31m08.29s"
+    dec: "+30d30m32.9s"
+    names: ["3C286", "1331+305", "J1331+3030"]
+    stokes_I: 15.0
+    spectral_index: [-0.465, -0.18]
+    reffreq: "1.4GHz"
+    polarization_fraction: [0.095]
+    polarization_angle: [33.0]  # degrees
+    notes: "Standard pol angle calibrator, stable"
+  
+  3C138:
+    ra: "05h21m09.89s"
+    dec: "+16d38m22.1s"
+    names: ["3C138", "0521+166", "J0521+1638"]
+    stokes_I: 8.5
+    spectral_index: [-0.5]
+    reffreq: "1.4GHz"
+    polarization_fraction: [0.075]
+    polarization_angle: [-10.0]  # degrees
+    notes: "VARIABLE - use 3C286 if possible"
+
+  3C48:
+    ra: "01h37m41.30s"
+    dec: "+33d09m35.1s"
+    names: ["3C48", "0137+331", "J0137+3309"]
+    stokes_I: 16.5
+    spectral_index: [-0.8]
+    reffreq: "1.4GHz"
+    polarization_fraction: [0.005]
+    polarization_angle: [25.0]
+    notes: "Low polarization, flux calibrator"

@@ -1,0 +1,56 @@
+environment:
+  working_dir: ./
+  scheduler: pbs
+  casa_path: /home/apal/casa-6.6.4-34-py3.8.el8
+  shell_preamble: |
+    source ~/.bashrc
+    mamba activate 38data
+
+resources:
+  default: {nodes: 1, ppn: 4, walltime: 04:00:00, mem_gb: 128}
+  flagging: {nodes: 2, ppn: 8, walltime: 12:00:00, mem_gb: 512}
+  crosscal: {nodes: 2, ppn: 8, walltime: 12:00:00, mem_gb: 128}
+  selfcal: {nodes: 1, ppn: 4, walltime: 12:00:00, mem_gb: 128}
+  imaging: {nodes: 1, ppn: 8, walltime: 24:00:00, mem_gb: 512}
+
+data:
+  ms: G71.ms
+  processing_spw: 4
+
+sources:
+  auto_detect: true
+  overrides:
+    calibrators: {amp: [3C286, 3C48], phase: 1845+401, leakage: 1845+401, pol_angle: 3C286}
+    uvranges: {"3C286": "0~56klambda", "3C48": ""}
+
+flow:
+  initial_calibration_flagging:
+    setup: {initialize: true, make_structure: true, brotherhood: true}
+    flagging: {bad_antennas: {auto: true, list: []}, rfi: true, use_gpu: true}
+    calibration:
+      refant: C00
+      pol: {leakage: {mode: Df}, angle: true}
+      control: {check_solutions: true, plot: true}
+      apply: {targets: true, calibrators: true}
+
+  imaging_selfcal:
+    dirty_image: true
+    selfcal:
+      avg_flag: true
+      freqbin: 10
+      flag_residuals: true
+      imaging: {imsize: 7200, cellsize: 1asec, use_catalogs: true}
+      loops: {phase: 4, amp_phase: 2, solint: 4min, refant: C00}
+      clean: {threshold: 0.001, start_iters: 1000}
+  dd_cal:
+    source_finding:
+      flux_threshold_mJy: 50
+      eps_factor: 5
+      min_samples: 3
+      mask_radius_factor: 2.5
+    peeling:
+        time_chunk: 0
+        g_time_interval: 120s
+        g_freq_interval: 0
+        de_time_interval: 120s
+        de_freq_interval: 0

@@ -1,0 +1,5 @@
+full_stokes:
+  3C286: {source: "3C286", reffreq: "0.65GHz", stokes_I: 21.1724326, spectral_index: [-0.398465, -0.14583], polarization_fraction: [0.03089562, 0.07728649, -0.07319306], polarization_angle: [1.10376585, 10.86354924, 71.17898745, 240.50941923, 409.24434549, 300.61503066]}
+  3C48: {source: "3C48", reffreq: "1.0GHz", stokes_I: 16.50, spectral_index: [-0.47, -0.13], polarization_fraction: [0.005], polarization_angle: [0.0]}
+
+boring_ones:
