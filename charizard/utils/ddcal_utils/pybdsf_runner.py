@@ -9,6 +9,7 @@ import time
 from typing import List, Dict, Optional
 
 from housekeeper import Housekeeper
+from ..container import build_udocker_prefix
 
 
 def run_pybdsf(hk: Housekeeper,
@@ -98,9 +99,10 @@ print(f"Found {{img.nsrc}} sources in {{img.nisl}} islands")
         with open(script_file, 'w') as f:
             f.write(script)
         
+        udocker = build_udocker_prefix(config)
         command = f"""cd {os.getcwd()}
 {preamble}
-python3 {script_file}
+{udocker} python3 {script_file}
 """
         
         job = hk.submit(

@@ -17,6 +17,7 @@ import yaml
 from typing import List, Dict, Optional
 
 from housekeeper import Housekeeper
+from ..container import build_udocker_prefix
 
 # Import existing flagging functions
 from ..flagging_utils.catboss import run_catboss
@@ -290,9 +291,10 @@ print(f"SUCCESS: {round_name} complete")
             with open(script_file, 'w') as f:
                 f.write(script)
             
+            udocker = build_udocker_prefix(config)
             command = f"""cd {os.getcwd()}
 {preamble}
-{casa_path}/bin/casa --nologger --nogui -c {script_file}
+{udocker} casa --nologger --nogui -c {script_file}
 """
             
             job = hk.submit(

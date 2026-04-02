@@ -18,27 +18,30 @@ from typing import Dict, List, Optional, Any
 @dataclass
 class PipelineConfig:
     """Complete pipeline configuration"""
-    
+
     # Paths
     ms_path: str
     ms_name: str
     working_dir: str
-    
+
     # Raw config sections
     environment: Dict[str, Any]
     data: Dict[str, Any]
     sources: Dict[str, Any]
     flow: Dict[str, Any]
-    
+
     # Parsed convenience fields
     target_spws: int
     resources: Dict[str, Dict]
-    
+
+    # Container config (udocker)
+    container: Dict[str, Any] = field(default_factory=dict)
+
     # Source overrides (parsed for convenience)
     auto_detect: bool = True
     calibrator_overrides: Dict[str, Any] = field(default_factory=dict)
     uvrange_overrides: Dict[str, str] = field(default_factory=dict)
-    
+
     # User models (from models.yaml)
     user_models: Dict[str, Any] = field(default_factory=dict)
 
@@ -106,22 +109,25 @@ def parse_config(pokedex_path: str, models_path: Optional[str] = None) -> Pipeli
         ms_path=ms_path,
         ms_name=ms_name,
         working_dir=working_dir,
-        
+
         # Raw sections
         environment=environment,
         data=data,
         sources=sources,
         flow=flow,
-        
+
         # Parsed fields
         target_spws=data.get('processing_spw', 1),
         resources=resources,
-        
+
+        # Container (udocker)
+        container=environment.get('container', {}),
+
         # Source config
         auto_detect=sources.get('auto_detect', True),
         calibrator_overrides=calibrator_overrides,
         uvrange_overrides=uvrange_overrides,
-        
+
         # User models
         user_models=user_models,
     )

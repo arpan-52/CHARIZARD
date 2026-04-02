@@ -8,6 +8,7 @@ import time
 from typing import List, Dict, Optional, Tuple
 
 from housekeeper import Housekeeper
+from ..container import build_udocker_prefix
 
 
 def build_wsclean_command(ms_list: List[str],
@@ -163,10 +164,11 @@ def run_wsclean(hk: Housekeeper,
         with open(script_file, 'w') as f:
             f.write(f"#!/bin/bash\ncd {os.getcwd()}\n{preamble}\n{cmd}\n")
         os.chmod(script_file, 0o755)
-        
+
+        udocker = build_udocker_prefix(config)
         command = f"""cd {os.getcwd()}
 {preamble}
-{cmd}
+{udocker} {cmd}
 """
         
         job = hk.submit(

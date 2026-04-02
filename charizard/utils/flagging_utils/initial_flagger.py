@@ -8,6 +8,7 @@ import time
 from typing import List, Optional, Dict
 
 from housekeeper import Housekeeper
+from ..container import build_udocker_prefix
 
 
 def run_initial_flagging(hk: Housekeeper,
@@ -76,9 +77,10 @@ print("Applied {flag_file} to {ms_path}")
         with open(script_file, 'w') as f:
             f.write(casa_script)
         
+        udocker = build_udocker_prefix(config)
         command = f"""cd {os.getcwd()}
 {preamble}
-{casa_path}/bin/casa --nologger --nogui -c {script_file}
+{udocker} casa --nologger --nogui -c {script_file}
 """
         
         job = hk.submit(

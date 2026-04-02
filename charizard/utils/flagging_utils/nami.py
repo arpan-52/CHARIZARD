@@ -11,6 +11,8 @@ from typing import List, Optional, Dict
 
 from housekeeper import Housekeeper
 
+from ..container import build_udocker_prefix
+
 
 # Hardcoded NAMI defaults
 # Note: timebin is in MINUTES
@@ -37,37 +39,38 @@ def build_nami_command(ms_path: str,
                        field: str = None,
                        corr: str = None) -> str:
     """
-    Build nami command string.
-    
+    Build catboss nimki command string (replaces nami).
+
     Args:
-        ms_path: Path to measurement set
+        ms_path:    Path to measurement set
         datacolumn: Data column to flag
-        sigma: Sigma threshold
-        nknots: Number of knots for spline
-        timebin: Time bin in seconds
-        ncpu: Number of CPUs
-        field: Field selection
-        corr: Correlation selection
-    
+        sigma:      Sigma threshold
+        nknots:     Number of Gabor components (maps to --n-components)
+        timebin:    Time bin in minutes
+        ncpu:       Number of CPUs (0 = all)
+        field:      Field selection
+        corr:       Correlation selection
+
     Returns:
-        nami command string
+        catboss nimki command string
     """
     sigma = sigma or NAMI_DEFAULTS['sigma']
-    nknots = nknots or NAMI_DEFAULTS['nknots']
+    n_components = nknots or NAMI_DEFAULTS['nknots']
     timebin = timebin or NAMI_DEFAULTS['timebin']
-    
-    cmd = f"nami {ms_path}"
+
+    cmd = f"catboss nimki {ms_path}"
     cmd += f" --datacolumn {datacolumn}"
     cmd += f" --sigma {sigma}"
-    cmd += f" --nknots {nknots}"
+    cmd += f" --n-components {n_components}"
     cmd += f" --timebin {timebin}"
     cmd += f" --ncpu {ncpu}"
-    
+    cmd += f" --apply-flags"
+
     if field:
         cmd += f" --field {field}"
     if corr:
         cmd += f" --corr {corr}"
-    
+
     return cmd
 
 
@@ -132,11 +135,12 @@ def run_nami(hk: Housekeeper,
             continue
         
         job_name = f"nami_{prefix}_{spw}" if prefix else f"nami_{spw}"
-        batch_script = '\n'.join(commands)
-        
+        udocker = build_udocker_prefix(config)
+        batch_script = f"\n{udocker} ".join(commands)
+
         command = f"""cd {os.getcwd()}
 {preamble}
-{batch_script}
+{udocker} {batch_script}
 """
         
         job = hk.submit(

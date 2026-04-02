@@ -17,6 +17,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from housekeeper import Housekeeper
+from ..container import build_udocker_prefix
 
 from ..general.tracker import JobTracker
 
@@ -288,9 +289,10 @@ def run_split(hk: Housekeeper,
             f.write(script)
         
         # Build command
+        udocker = build_udocker_prefix(config)
         command = f"""cd {os.getcwd()}
 {preamble}
-{casa_path}/bin/casa --nologger --nogui -c {script_file}
+{udocker} casa --nologger --nogui -c {script_file}
 """
         
         # Submit

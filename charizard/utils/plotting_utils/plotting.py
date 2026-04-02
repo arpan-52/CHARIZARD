@@ -9,6 +9,7 @@ import time
 from typing import Optional, List, Dict
 
 from housekeeper import Housekeeper
+from ..container import build_udocker_prefix
 
 
 def shadems_cmd(ms: str, xaxis: str, yaxis: str,
@@ -198,11 +199,12 @@ def run_diagnostic_plots(hk: Housekeeper,
             f.write(script)
         os.chmod(script_file, 0o755)
         
+        udocker = build_udocker_prefix(config)
         command = f"""cd {os.getcwd()}
 {preamble}
-bash {script_file}
+{udocker} bash {script_file}
 """
-        
+
         job = hk.submit(
             command=command,
             name=f"plot_cal_{spw}",
@@ -224,11 +226,12 @@ bash {script_file}
                 f.write(script)
             os.chmod(script_file, 0o755)
             
+            udocker = build_udocker_prefix(config)
             command = f"""cd {os.getcwd()}
 {preamble}
-bash {script_file}
+{udocker} bash {script_file}
 """
-            
+
             job = hk.submit(
                 command=command,
                 name=f"plot_src_{spw}",

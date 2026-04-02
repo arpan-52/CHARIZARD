@@ -437,9 +437,10 @@ print("Done!")
         with open(script_file, 'w') as f:
             f.write(script)
         
+        udocker = build_udocker_prefix(config)
         command = f"""cd {os.getcwd()}
 {preamble}
-python3 {script_file}
+{udocker} python3 {script_file}
 """
         
         job = hk.submit(
@@ -527,9 +528,10 @@ print(f"Best refant: {{refant}}")
         with open(script_file, 'w') as f:
             f.write(script)
         
+        udocker = build_udocker_prefix(config)
         command = f"""cd {os.getcwd()}
 {preamble}
-python3 {script_file}
+{udocker} python3 {script_file}
 """
         
         job = hk.submit(

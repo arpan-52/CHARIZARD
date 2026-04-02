@@ -10,6 +10,8 @@ from typing import List, Optional
 
 from housekeeper import Housekeeper
 
+from ..container import build_udocker_prefix
+
 
 def run_ddcal_peeling(hk: Housekeeper,
                       config,
@@ -69,9 +71,6 @@ def run_ddcal_peeling(hk: Housekeeper,
     
     cb_lines = [
         f"#!/bin/bash",
-        f"cd {os.getcwd()}",
-        f"{preamble}",
-        f"",
         f"echo '=== CrystalBall for {field} ==='",
         f"",
         f"# First: load ALL sources into MODEL_DATA",
@@ -119,8 +118,9 @@ def run_ddcal_peeling(hk: Housekeeper,
         f.write(cb_script)
     os.chmod(cb_script_file, 0o755)
     
+    udocker = build_udocker_prefix(config)
     job = hk.submit(
-        command=f"bash {os.getcwd()}/{cb_script_file}",
+        command=f"cd {os.getcwd()}\n{preamble}\n{udocker} bash {os.getcwd()}/{cb_script_file}",
         name=f"crystalball_{field}",
         job_subdir=output_dir,
         ppn=ppn,
@@ -283,9 +283,6 @@ echo "SUCCESS: QuartiCal peeling complete -> PEELED_DATA"
     image_prefix = f"{output_dir}/peeled_{field}"
     
     ws_script = f"""#!/bin/bash
-cd {os.getcwd()}
-{preamble}
-
 echo "=== Final WSClean for {field} ==="
 echo "Data column: PEELED_DATA"
 
@@ -329,7 +326,7 @@ echo "SUCCESS: Final image created"
     os.chmod(ws_script_file, 0o755)
     
     job = hk.submit(
-        command=f"bash {os.getcwd()}/{ws_script_file}",
+        command=f"cd {os.getcwd()}\n{preamble}\n{udocker} bash {os.getcwd()}/{ws_script_file}",
         name=f"wsclean_peeled_{field}",
         job_subdir=output_dir,
         ppn=config.resources.get('imaging', {}).get('ppn', 8),

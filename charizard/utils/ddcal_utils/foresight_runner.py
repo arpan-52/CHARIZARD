@@ -9,6 +9,8 @@ from typing import Dict, List
 
 from housekeeper import Housekeeper
 
+from ..container import build_udocker_prefix
+
 
 def run_foresight(hk: Housekeeper,
                   config,
@@ -46,9 +48,6 @@ def run_foresight(hk: Housekeeper,
         output_files[field] = source_file
         
         script = f"""#!/bin/bash
-cd {os.getcwd()}
-{preamble}
-
 echo "Running Foresight for {field}"
 
 foresight {ms_path} \\
@@ -68,14 +67,15 @@ else
     exit 1
 fi
 """
-        
+
         script_file = f"foresight_{field}.sh"
         with open(script_file, 'w') as f:
             f.write(script)
         os.chmod(script_file, 0o755)
-        
+
+        udocker = build_udocker_prefix(config)
         job = hk.submit(
-            command=f"bash {os.getcwd()}/{script_file}",
+            command=f"cd {os.getcwd()}\n{preamble}\n{udocker} bash {os.getcwd()}/{script_file}",
             name=f"foresight_{field}",
             job_subdir=output_dir,
             ppn=ppn,
