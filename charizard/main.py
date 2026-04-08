@@ -31,6 +31,11 @@ ERROR_WHITELIST = [
     "Leap second table TAI_UTC seems out-of-date",
     "Until the table is updated (see the CASA documentation or your system admin)",
     "times and coordinates derived from UTC could be wrong by 1s or more.",
+    "no auto update is possible on this measurespath by this user",
+    "measurespath must exist as a directory and it must be owned by the user",
+    "The expected casa data was not found at measurespath",
+    "The expected measures data was not found at measurespath",
+    "visit https://casadocs.readthedocs.io",
     
     # QuartiCal/Numba warnings
     "NumbaPendingDeprecationWarning",

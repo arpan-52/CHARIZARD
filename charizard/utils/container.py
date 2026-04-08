@@ -49,7 +49,7 @@ def build_udocker_prefix(config) -> str:
             else:
                 volumes.append(f"--volume={v}:{v}")
 
-    return f"udocker run {' '.join(volumes)} {name}"
+    return f"udocker run --workdir={wd} {' '.join(volumes)} {name}"
 
 
 def setup_container(image: str = DEFAULT_IMAGE,
