@@ -15,8 +15,6 @@ from multiprocessing import Pool
 
 from casacore import tables
 
-from ..container import build_udocker_prefix
-
 
 def remove_table_lock(ms_path: str):
     """Remove table lock file if exists."""
@@ -439,12 +437,11 @@ print("Done!")
         with open(script_file, 'w') as f:
             f.write(script)
         
-        udocker = build_udocker_prefix(config)
         command = f"""cd {os.getcwd()}
 {preamble}
-{udocker} python3 {script_file}
+python3 {script_file}
 """
-        
+
         job = hk.submit(
             command=command,
             name=f"badant_{spw}",
@@ -452,12 +449,12 @@ print("Done!")
             ppn=ppn,
             walltime=resources.get('walltime', '02:00:00')
         )
-        
+
         if job.job_id:
             job_ids.append(job.job_id)
             job_map[job.job_id] = spw
             logger.info(f"Submitted bad antenna detection for {spw}: {job.job_id}")
-        
+
         time.sleep(0.5)
     
     if not job_ids:
@@ -530,12 +527,11 @@ print(f"Best refant: {{refant}}")
         with open(script_file, 'w') as f:
             f.write(script)
         
-        udocker = build_udocker_prefix(config)
         command = f"""cd {os.getcwd()}
 {preamble}
-{udocker} python3 {script_file}
+python3 {script_file}
 """
-        
+
         job = hk.submit(
             command=command,
             name=f"refant_{spw}",
@@ -543,12 +539,12 @@ print(f"Best refant: {{refant}}")
             ppn=ppn,
             walltime="01:00:00"
         )
-        
+
         if job.job_id:
             job_ids.append(job.job_id)
             job_map[job.job_id] = spw
             logger.info(f"Submitted refant finding for {spw}: {job.job_id}")
-        
+
         time.sleep(0.5)
     
     if not job_ids:
