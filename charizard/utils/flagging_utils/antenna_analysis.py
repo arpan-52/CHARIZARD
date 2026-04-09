@@ -15,6 +15,8 @@ from multiprocessing import Pool
 
 from casacore import tables
 
+from ..container import build_udocker_prefix
+
 
 def remove_table_lock(ms_path: str):
     """Remove table lock file if exists."""

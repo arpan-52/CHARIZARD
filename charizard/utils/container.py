@@ -81,11 +81,15 @@ def setup_container(image: str = DEFAULT_IMAGE,
         return False
     console.print("[green]  Pull OK[/green]")
 
-    # 2. Create container
+    # 2. Remove old container if it exists, then create fresh
     console.print(f"\n[bold]2.[/bold] Creating container [cyan]{name}[/cyan] ...")
+    ret = subprocess.run(["udocker", "rm", name], capture_output=True, check=False)
+    if ret.returncode == 0:
+        console.print(f"[yellow]  Removed existing container '{name}'[/yellow]")
     ret = subprocess.run(["udocker", "create", f"--name={name}", image], check=False)
     if ret.returncode != 0:
-        console.print("[yellow]  Note: container may already exist — continuing[/yellow]")
+        console.print("[red]ERROR: Failed to create container.[/red]")
+        return False
 
     # 3. NVIDIA setup
     console.print(f"\n[bold]3.[/bold] Configuring NVIDIA GPU support ...")
