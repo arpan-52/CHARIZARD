@@ -40,8 +40,11 @@ flow:
       freqbin: 10
       flag_residuals: true
       imaging: {imsize: 7200, cellsize: 1asec, use_catalogs: true}
-      loops: {phase: 4, amp_phase: 2, solint: 4min, refant: C00}
-      clean: {threshold: 0.001, start_iters: 1000}
+      # factor: shared progression factor per round -> niter *= factor,
+      #         threshold /= factor, solint /= factor. min_solint floors solint.
+      loops: {phase: 4, amp_phase: 2, solint: 4min, min_solint: 8s, factor: 2, refant: C00}
+      # min_threshold: floor for the per-round clean threshold (0 = no floor)
+      clean: {threshold: 0.001, start_iters: 1000, min_threshold: 0.0}
   dd_cal:
     source_finding:
       flux_threshold_mJy: 50

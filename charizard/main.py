@@ -98,8 +98,8 @@ ERROR_WHITELIST = [
     "Warning: Model component",
     "No MODEL_DATA column found",
     "Creating MODEL_DATA column",
-    "NumbaDeprecationWarning: numba.generated_jit is deprecated"
-    
+    "NumbaDeprecationWarning: numba.generated_jit is deprecated",
+
     # General computation warnings
     "divide by zero encountered",
     "invalid value encountered",
@@ -108,9 +108,9 @@ ERROR_WHITELIST = [
     "NaN values detected",
     "Empty array passed",
     
-    # Nami warnings
-    "nami",
-    "Nami",
+    # Nimki warnings
+    "nimki",
+    "Nimki",
     
 
     # Concat 

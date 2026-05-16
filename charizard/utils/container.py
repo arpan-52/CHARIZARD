@@ -137,8 +137,13 @@ def _test_gpu(name: str) -> bool:
 
 
 def _find_container_root(name: str) -> Optional[str]:
-    """Locate the container's ROOT filesystem inside ~/.udocker."""
-    containers_dir = os.path.expanduser("~/.udocker/containers")
+    """Locate the container's ROOT filesystem.
+
+    Honors $UDOCKER_DIR (used on HPC clusters where udocker lives on shared
+    scratch, e.g. /lustre/.../udocker), falling back to ~/.udocker.
+    """
+    udocker_dir = os.environ.get("UDOCKER_DIR") or os.path.expanduser("~/.udocker")
+    containers_dir = os.path.join(udocker_dir, "containers")
 
     # Direct name match
     direct = os.path.join(containers_dir, name, "ROOT")

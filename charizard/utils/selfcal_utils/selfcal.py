@@ -4,7 +4,7 @@ Self-calibration loop.
 
 Flow per round:
 1. Catboss (GPU, parallel) on DATA
-2. Nami (CPU, parallel) on DATA  
+2. Nimki (CPU, parallel) on DATA  
 3. Image (wsclean)
 4. Calibrate (gaincal + bandpass + applycal + mstransform)
 
@@ -21,33 +21,64 @@ from ..container import build_udocker_prefix
 
 # Import existing flagging functions
 from ..flagging_utils.catboss import run_catboss
-from ..flagging_utils.nami import run_nami
+from ..flagging_utils.nimki import run_nimki
 
 
-def get_solint_sequence(phase_rounds: int, ap_rounds: int, initial_solint: str) -> List[str]:
-    """Generate solint sequence - constant for now."""
-    initial_min = int(initial_solint.replace('min', '').replace('m', ''))
-    sequence = [f"{max(initial_min, 1)}min"] * (phase_rounds + ap_rounds)
+def parse_solint_seconds(solint: str) -> float:
+    """Parse a CASA solint string to seconds. Supports h/min/m/s suffixes."""
+    s = str(solint).strip().lower()
+    try:
+        if s.endswith('min'):
+            return float(s[:-3]) * 60.0
+        if s.endswith('h'):
+            return float(s[:-1]) * 3600.0
+        if s.endswith('s'):
+            return float(s[:-1])
+        if s.endswith('m'):
+            return float(s[:-1]) * 60.0
+        return float(s)  # bare number = seconds
+    except ValueError:
+        return 240.0  # safe default (4 min)
+
+
+def format_solint(seconds: float) -> str:
+    """Format seconds back to a CASA-friendly solint string."""
+    return f"{max(int(round(seconds)), 1)}s"
+
+
+def get_niter_sequence(start_iters: int, total_rounds: int, factor: float) -> List[int]:
+    """niter grows by `factor` each round."""
+    sequence = []
+    current = float(start_iters)
+    for _ in range(total_rounds):
+        sequence.append(int(round(current)))
+        current *= factor
     return sequence
 
 
-def get_niter_sequence(start_iters: int, total_rounds: int) -> List[int]:
-    """Generate niter sequence. Doubles each round."""
+def get_threshold_sequence(start_threshold: float, total_rounds: int,
+                           factor: float, min_threshold: float = 0.0) -> List[float]:
+    """Clean threshold shrinks by `factor` each round, floored at min_threshold."""
     sequence = []
-    current = start_iters
-    for i in range(total_rounds):
+    current = float(start_threshold)
+    for _ in range(total_rounds):
+        if min_threshold > 0:
+            current = max(current, min_threshold)
         sequence.append(current)
-        current *= 2
+        current = current / factor
     return sequence
 
 
-def get_threshold_sequence(start_threshold: float, total_rounds: int) -> List[float]:
-    """Generate threshold sequence. Decreases by 1.5x each round."""
+def get_solint_sequence(initial_solint: str, total_rounds: int,
+                        factor: float, min_solint: str) -> List[str]:
+    """solint shrinks by `factor` each round, floored at min_solint."""
+    current = parse_solint_seconds(initial_solint)
+    floor = parse_solint_seconds(min_solint)
     sequence = []
-    current = start_threshold
-    for i in range(total_rounds):
-        sequence.append(current)
-        current = current / 1.5
+    for _ in range(total_rounds):
+        val = max(current, floor)
+        sequence.append(format_solint(val))
+        current = current / factor
     return sequence
 
 def run_selfcal_flagging(hk: Housekeeper,
@@ -58,8 +89,8 @@ def run_selfcal_flagging(hk: Housekeeper,
                          whitelist: List[str],
                          brotherhood: bool) -> Optional[Dict[str, List[str]]]:
     """
-    Run catboss (GPU) then nami (CPU) on selfcal MS files.
-    Uses existing run_catboss and run_nami functions.
+    Run catboss (GPU) then nimki (CPU) on selfcal MS files.
+    Uses existing run_catboss and run_nimki functions.
     
     Returns:
         Updated ms_map, or None if failure and brotherhood=True
@@ -126,9 +157,9 @@ def run_selfcal_flagging(hk: Housekeeper,
     active_spws = result_spws
     prev_spws = active_spws.copy()
     
-    # Step 2: Nami (CPU)
-    logger.substep(f"Nami for {round_name}...")
-    result_spws = run_nami(
+    # Step 2: Nimki (CPU)
+    logger.substep(f"Nimki for {round_name}...")
+    result_spws = run_nimki(
         hk=hk,
         config=config,
         active_spws=active_spws,
@@ -141,17 +172,17 @@ def run_selfcal_flagging(hk: Housekeeper,
     )
     
     if result_spws is None:
-        logger.error("ALL SPWs failed nami!")
+        logger.error("ALL SPWs failed nimki!")
         return None
     
     # Check for failures
     failed_spws = set(prev_spws) - set(result_spws)
     if failed_spws:
         if brotherhood:
-            logger.error(f"Brotherhood=True, nami failed for: {failed_spws}, stopping!")
+            logger.error(f"Brotherhood=True, nimki failed for: {failed_spws}, stopping!")
             return None
         else:
-            logger.warning(f"Nami failed for {failed_spws}, continuing with {result_spws}")
+            logger.warning(f"Nimki failed for {failed_spws}, continuing with {result_spws}")
     
     # Build updated ms_map with only successful SPWs
     new_ms_map = {}
@@ -178,15 +209,22 @@ def run_gaincal_bandpass(hk: Housekeeper,
                          output_ms_suffix: str,
                          logger,
                          whitelist: List[str],
-                         brotherhood: bool) -> Optional[Dict[str, List[str]]]:
+                         brotherhood: bool,
+                         pol_basis: str = 'circular') -> Optional[Dict[str, List[str]]]:
     """
     Run gaincal + bandpass + applycal + mstransform for all fields in parallel.
-    
+
+    Args:
+        pol_basis: 'circular' or 'linear' - determines gaintype (G vs T)
+
     Returns:
         Updated ms_map with new MS paths, or None if brotherhood=True and failure
     """
+    # Gaintype: T for linear feeds, G for circular
+    gaintype = 'T' if pol_basis == 'linear' else 'G'
+
     mode_name = 'phase' if calmode == 'p' else 'amp+phase'
-    logger.substep(f"Running gaincal+bandpass ({mode_name}, solint={solint}, solnorm={solnorm})...")
+    logger.substep(f"Running gaincal+bandpass ({mode_name}, solint={solint}, gaintype={gaintype})...")
     
     env = config.environment
     casa_path = env.get('casa_path', '')
@@ -214,7 +252,7 @@ def run_gaincal_bandpass(hk: Housekeeper,
             caltable_b = f"{field_dir}/selfcal-tables/{round_name}.b"
             
             script = f'''# Selfcal {round_name} for {spw}/{field}
-# calmode={calmode}, solnorm={solnorm}, solint={solint}
+# calmode={calmode}, solnorm={solnorm}, solint={solint}, gaintype={gaintype}
 
 import os
 
@@ -237,7 +275,7 @@ gaincal(
     solint='{solint}',
     refant='{refant}',
     minsnr=2.0,
-    gaintype='G',
+    gaintype='{gaintype}',
     calmode='{calmode}',
     solnorm={solnorm}
 )
@@ -358,37 +396,64 @@ def run_selfcal_loop(hk: Housekeeper,
                      whitelist: List[str]) -> Optional[Dict[str, List[str]]]:
     """
     Run full self-calibration loop.
-    
+
     Flow per round:
     1. Catboss (GPU, parallel)
-    2. Nami (CPU, parallel)
+    2. Nimki (CPU, parallel)
     3. Image (wsclean)
     4. Calibrate (gaincal + bandpass + applycal + mstransform)
+
+    Uses gaintype T for linear feeds, G for circular feeds.
     """
     from .imaging import run_wsclean
-    
+
     # Get config
     flow = config.flow
     selfcal_config = flow.get('imaging_selfcal', {}).get('selfcal', {})
     loops_config = selfcal_config.get('loops', {})
     clean_config = selfcal_config.get('clean', {})
     setup_config = flow.get('imaging_selfcal', {}).get('setup', {})
-    
+
     phase_rounds = loops_config.get('phase', 4)
     ap_rounds = loops_config.get('amp_phase', 2)
     initial_solint = loops_config.get('solint', '4min')
     brotherhood = setup_config.get('brotherhood', True)
-    
+
+    # Single progression factor: niter *= factor, threshold /= factor,
+    # solint /= factor each round. Overridable from config; default 2.
+    factor = float(loops_config.get('factor', 2))
+    min_solint = loops_config.get('min_solint', '8s')
+
     start_iters = clean_config.get('start_iters', 1000)
-    
-    # Get sequences
-    solint_sequence = get_solint_sequence(phase_rounds, ap_rounds, initial_solint)
+    start_threshold = clean_config.get('threshold', 0.001)
+    min_threshold = float(clean_config.get('min_threshold', 0.0))
+
+    # Read pol_basis from calplan
+    calplan_file = f"{config.ms_name}.calplan"
+    pol_basis = 'circular'  # default
+    try:
+        if os.path.exists(calplan_file):
+            with open(calplan_file, 'r') as f:
+                calplan = yaml.safe_load(f)
+            pol_basis = calplan.get('pol_basis', 'circular')
+    except Exception as e:
+        logger.warning(f"Could not read pol_basis from {calplan_file}: {e}")
+
+    gaintype = 'T' if pol_basis == 'linear' else 'G'
+    logger.info(f"Feed basis: {pol_basis} -> gaintype={gaintype}")
+
+    # Get sequences (+2 headroom for the final image rounds)
     total_rounds = phase_rounds + ap_rounds
-    niter_sequence = get_niter_sequence(start_iters, total_rounds + 2)
-    
-    logger.info(f"Selfcal: {phase_rounds} phase + {ap_rounds} ap rounds")
-    logger.info(f"Solint: {initial_solint}")
-    logger.info(f"Niter sequence: {niter_sequence[:total_rounds+1]}")
+    solint_sequence = get_solint_sequence(initial_solint, total_rounds + 2,
+                                          factor, min_solint)
+    niter_sequence = get_niter_sequence(start_iters, total_rounds + 2, factor)
+    threshold_sequence = get_threshold_sequence(start_threshold, total_rounds + 2,
+                                                factor, min_threshold)
+
+    logger.info(f"Selfcal: {phase_rounds} phase + {ap_rounds} ap rounds (factor={factor})")
+    logger.info(f"Solint sequence: {solint_sequence[:total_rounds]}")
+    logger.info(f"Niter sequence: {niter_sequence[:total_rounds]}")
+    logger.info(f"Threshold sequence: {threshold_sequence[:total_rounds]}")
     logger.info(f"Brotherhood: {brotherhood}")
     
     round_idx = 0
@@ -400,28 +465,30 @@ def run_selfcal_loop(hk: Housekeeper,
         round_num = i + 1
         solint = solint_sequence[i]
         niter = niter_sequence[round_idx]
+        threshold = threshold_sequence[round_idx]
         output_suffix = f"pcal{round_num}.ms"
-        
-        logger.substep(f"=== Phase cal round {round_num}/{phase_rounds} (solint={solint}, niter={niter}) ===")
-        
-        # 1. Flag (catboss + nami)
+
+        logger.substep(f"=== Phase cal round {round_num}/{phase_rounds} (solint={solint}, niter={niter}, threshold={threshold}) ===")
+
+        # 1. Flag (catboss + nimki)
         ms_map = run_selfcal_flagging(hk, config, ms_map, f'pcal{round_num}', logger, whitelist, brotherhood)
         if ms_map is None:
             return None
-        
+
         # 2. Image
-        run_wsclean(hk, config, ms_map, niter, f'pcal{round_num}', logger, whitelist, datacolumn='DATA')
+        run_wsclean(hk, config, ms_map, niter, f'pcal{round_num}', logger, whitelist, datacolumn='DATA', threshold=threshold)
         
         # 3. Calibrate
         ms_map = run_gaincal_bandpass(
             hk, config, ms_map, refant, solint, 'p', True,
-            f'pcal{round_num}', output_suffix, logger, whitelist, brotherhood
+            f'pcal{round_num}', output_suffix, logger, whitelist, brotherhood,
+            pol_basis=pol_basis
         )
         if ms_map is None:
             return None
-        
+
         round_idx += 1
-    
+
     # =========================================================================
     # AMP+PHASE CALIBRATION ROUNDS
     # =========================================================================
@@ -429,22 +496,24 @@ def run_selfcal_loop(hk: Housekeeper,
         round_num = i + 1
         solint = solint_sequence[phase_rounds + i]
         niter = niter_sequence[round_idx]
+        threshold = threshold_sequence[round_idx]
         output_suffix = f"apcal{round_num}.ms"
-        
-        logger.substep(f"=== Amp+phase cal round {round_num}/{ap_rounds} (solint={solint}, niter={niter}) ===")
-        
-        # 1. Flag (catboss + nami)
+
+        logger.substep(f"=== Amp+phase cal round {round_num}/{ap_rounds} (solint={solint}, niter={niter}, threshold={threshold}) ===")
+
+        # 1. Flag (catboss + nimki)
         ms_map = run_selfcal_flagging(hk, config, ms_map, f'apcal{round_num}', logger, whitelist, brotherhood)
         if ms_map is None:
             return None
-        
+
         # 2. Image
-        run_wsclean(hk, config, ms_map, niter, f'apcal{round_num}', logger, whitelist, datacolumn='DATA')
-        
+        run_wsclean(hk, config, ms_map, niter, f'apcal{round_num}', logger, whitelist, datacolumn='DATA', threshold=threshold)
+
         # 3. Calibrate
         ms_map = run_gaincal_bandpass(
             hk, config, ms_map, refant, solint, 'ap', False,
-            f'apcal{round_num}', output_suffix, logger, whitelist, brotherhood
+            f'apcal{round_num}', output_suffix, logger, whitelist, brotherhood,
+            pol_basis=pol_basis
         )
         if ms_map is None:
             return None
@@ -455,7 +524,10 @@ def run_selfcal_loop(hk: Housekeeper,
     # FINAL IMAGE
     # =========================================================================
     logger.substep("=== Creating final selfcal images ===")
-    final_niter = niter_sequence[min(round_idx, len(niter_sequence)-1)] * 2
+    final_idx = min(round_idx, len(niter_sequence) - 1)
+    final_niter = int(round(niter_sequence[final_idx] * factor))
+    final_threshold = threshold_sequence[min(round_idx, len(threshold_sequence) - 1)]
+    logger.info(f"Final image: niter={final_niter}, threshold={final_threshold}")
     
     # Final flagging
     ms_map = run_selfcal_flagging(hk, config, ms_map, 'final', logger, whitelist, brotherhood)
@@ -488,7 +560,8 @@ def run_selfcal_loop(hk: Housekeeper,
         run_wsclean(
             hk, config, ms_map, final_niter, f'final_{stokes}',
             logger, whitelist, datacolumn='DATA', use_masks=True,
-            stokes=stokes, save_source_list=save_sources
+            stokes=stokes, save_source_list=save_sources,
+            threshold=final_threshold
         )
     
     logger.info(f"Selfcal complete. Remaining fields: {list(ms_map.keys())}")

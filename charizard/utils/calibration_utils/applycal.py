@@ -19,7 +19,11 @@ def build_applycal_script(spw: str,
                           do_fluxscale: bool = True) -> str:
     """
     Build CASA applycal script.
-    
+
+    Handles both circular and linear feeds:
+    - Circular: delays, bandpass, gain, delaycross, leakage, polangle
+    - Linear: bandpass, leakage, gain, xyphase
+
     Args:
         spw: SPW directory
         cal_plan: Calibration plan
@@ -27,7 +31,7 @@ def build_applycal_script(spw: str,
         target_type: 'calibrators' or 'targets'
         do_polcal: Whether polcal was done
         do_fluxscale: Whether fluxscale was done
-    
+
     Returns:
         CASA script string
     """
@@ -35,27 +39,47 @@ def build_applycal_script(spw: str,
     phase_cal = cal_plan.get('phase_cal', '')
     targets = cal_plan.get('targets', [])
     all_calibrators = cal_plan.get('all_calibrators', [])
-    
-    # Build gaintable list
-    gaintables = [
-        f"{spw}/caltables/delays.cal{cal_round}",
-        f"{spw}/caltables/bandpass.cal{cal_round}",
-    ]
-    
-    if do_fluxscale and os.path.exists(f"{spw}/caltables/flux.cal{cal_round}"):
-        gaintables.append(f"{spw}/caltables/flux.cal{cal_round}")
-    else:
-        gaintables.append(f"{spw}/caltables/amp_phase.cal{cal_round}")
-    
-    if do_polcal:
-        pol_tables = [
-            f"{spw}/caltables/delaycross.cal{cal_round}",
-            f"{spw}/caltables/leakage.cal{cal_round}",
-            f"{spw}/caltables/polangle.cal{cal_round}",
+    pol_basis = cal_plan.get('pol_basis', 'circular')
+
+    # Build gaintable list based on feed type
+    if pol_basis == 'linear':
+        # Linear feeds: delays, bandpass, leakage (if polcal), gain
+        gaintables = [
+            f"{spw}/caltables/delays.cal{cal_round}",
+            f"{spw}/caltables/bandpass.cal{cal_round}",
         ]
-        for pt in pol_tables:
-            if os.path.exists(pt):
-                gaintables.append(pt)
+
+        if do_polcal and os.path.exists(f"{spw}/caltables/leakage.cal{cal_round}"):
+            gaintables.append(f"{spw}/caltables/leakage.cal{cal_round}")
+
+        if do_fluxscale and os.path.exists(f"{spw}/caltables/flux.cal{cal_round}"):
+            gaintables.append(f"{spw}/caltables/flux.cal{cal_round}")
+        else:
+            gaintables.append(f"{spw}/caltables/amp_phase.cal{cal_round}")
+
+        if do_polcal and os.path.exists(f"{spw}/caltables/xyphase.cal{cal_round}"):
+            gaintables.append(f"{spw}/caltables/xyphase.cal{cal_round}")
+    else:
+        # Circular feeds: delays, bandpass, gain, polcal tables
+        gaintables = [
+            f"{spw}/caltables/delays.cal{cal_round}",
+            f"{spw}/caltables/bandpass.cal{cal_round}",
+        ]
+
+        if do_fluxscale and os.path.exists(f"{spw}/caltables/flux.cal{cal_round}"):
+            gaintables.append(f"{spw}/caltables/flux.cal{cal_round}")
+        else:
+            gaintables.append(f"{spw}/caltables/amp_phase.cal{cal_round}")
+
+        if do_polcal:
+            pol_tables = [
+                f"{spw}/caltables/delaycross.cal{cal_round}",
+                f"{spw}/caltables/leakage.cal{cal_round}",
+                f"{spw}/caltables/polangle.cal{cal_round}",
+            ]
+            for pt in pol_tables:
+                if os.path.exists(pt):
+                    gaintables.append(pt)
     
     gaintables_str = "['" + "','".join(gaintables) + "']"
     num_tables = len(gaintables)

@@ -109,5 +109,8 @@ docker-compose.override.yml
 # AI Assistant Config
 # =========================
 CLAUDE.md
+.code-review-graph/
+.claude/
+.aider*
 
 

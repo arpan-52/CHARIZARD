@@ -53,7 +53,7 @@ def build_wsclean_command(ms_list: List[str],
     -pol {stokes} \\
     -data-column {datacolumn} \\
     -niter {niter} \\
-    -auto-mask 7 \\
+    -auto-mask 5 \\
     -auto-threshold 3 \\
     -gain 0.1 \\
     -mgain 0.7 \\
@@ -89,7 +89,8 @@ def run_wsclean(hk: Housekeeper,
                 datacolumn: str = 'DATA',
                 use_masks: bool = False,
                 stokes: str = 'I',
-                save_source_list: bool = False) -> Optional[Dict[str, str]]:
+                save_source_list: bool = False,
+                threshold: float = None) -> Optional[Dict[str, str]]:
     """
     Run wsclean for all fields in parallel.
     
@@ -124,7 +125,9 @@ def run_wsclean(hk: Housekeeper,
     
     imsize = imaging_config.get('imsize', 4096)
     cellsize = imaging_config.get('cellsize', '1asec')
-    threshold = clean_config.get('threshold', 0.001)
+    # Per-round threshold from the selfcal schedule; fall back to static config.
+    if threshold is None:
+        threshold = clean_config.get('threshold', 0.001)
     
     # Create images directory
     os.makedirs('images', exist_ok=True)

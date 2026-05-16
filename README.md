@@ -174,11 +174,14 @@ flow:
       loops:
         phase:     4
         amp_phase: 2
-        solint:    4min
+        solint:    4min      # starting solint
+        min_solint: 8s       # solint floor
+        factor:    2         # per-round progression factor (see below)
         refant:    C00
       clean:
-        threshold:   0.001
-        start_iters: 1000
+        threshold:     0.001 # starting clean threshold
+        min_threshold: 0.0   # threshold floor (0 = no floor)
+        start_iters:   1000  # starting wsclean niter
 
   dd_cal:
     source_finding:
@@ -209,6 +212,16 @@ wrong.
 
 **`shell_preamble`** — runs on the compute node before each job. Must activate
 the environment that has udocker. Does not run inside the container.
+
+**`factor`** (selfcal) — a single progression factor applied every self-cal
+round: `niter` is multiplied by it, while `clean.threshold` and `solint` are
+divided by it. So with `factor: 2`, `start_iters: 1000`, `solint: 4min`,
+`threshold: 0.001` the rounds run niter `1000 → 2000 → 4000 …`, solint
+`4min → 2min → 1min …` (floored at `min_solint`), threshold
+`1e-3 → 5e-4 → 2.5e-4 …` (floored at `min_threshold`). Lower it (e.g. `1.5`)
+or raise `min_threshold` if images look over-cleaned. Note wsclean also runs
+`-auto-threshold 3`, so early rounds are noise-limited at 3σ until the
+scheduled threshold drops below that.
 
 ## Pipeline steps
 

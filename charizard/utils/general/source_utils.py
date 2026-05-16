@@ -258,12 +258,37 @@ class CalibratorMatcher:
         
         return False
     
+    def has_full_stokes_model(self, source_name: str) -> bool:
+        """Check if source has a full Stokes (I, Q, U, V) model for setjy.
+
+        A full Stokes model must have polarization_fraction and polarization_angle
+        defined (for polcal sources like 3C286), OR be explicitly in full_stokes dict.
+
+        This determines if setjy can be run with full polarization info.
+        """
+        # Check user models for full_stokes dict first
+        if self.user_models:
+            full_stokes = self.user_models.get('full_stokes', {})
+            if source_name in full_stokes:
+                return True
+
+        # Check polcal_models for full Stokes info
+        model = self.get_polcal_model(source_name)
+        if model:
+            # Model must have polarization info to be full Stokes
+            has_pol_frac = 'polarization_fraction' in model or 'pol_frac' in model
+            has_pol_angle = 'polarization_angle' in model or 'pol_angle' in model
+            if has_pol_frac and has_pol_angle:
+                return True
+
+        return False
+
     def get_leakage_cal_status(self, source_name: str) -> str:
         """Get polarization status of leakage calibrator.
-        
+
         Returns:
             'unpolarized' - source is in known_unpolarized
-            'polarized' - source is in known_polarized  
+            'polarized' - source is in known_polarized
             'assumed_unpolarized' - source not in either list, assuming unpolarized
         """
         if self.is_known_unpolarized(source_name):
@@ -277,15 +302,18 @@ class CalibratorMatcher:
 def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
     """
     Build calibration plan from MS info and config.
-    
+
     Returns cal_plan with:
     - flux_cal, phase_cal, leakage_cal, polangle_cal
     - all_calibrators (for cal.ms split)
     - targets (for src.ms split)
     - calibrator_uvranges
     - polcal_models
+    - pol_basis ('circular' or 'linear')
+    - gain_calibrators (for linear feeds: excludes polarized cals without models)
+    - polangle_has_full_stokes_model (bool)
     """
-    
+
     cal_plan = {
         'flux_cal': None,
         'phase_cal': None,
@@ -293,8 +321,11 @@ def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
         'polangle_cal': None,
         'targets': [],
         'all_calibrators': [],
+        'gain_calibrators': [],  # For linear feeds: cals to use in gain cal
         'calibrator_uvranges': {},
         'polcal_models': {},
+        'pol_basis': ms_info.get('pol_basis', 'circular'),
+        'polangle_has_full_stokes_model': False,
     }
     
     overrides = config.calibrator_overrides
@@ -440,7 +471,63 @@ def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
         if model:
             cal_plan['polcal_models'][cal] = model
             logger.info(f"Polcal model found for {cal}")
-    
+
+    # =========================================================================
+    # CHECK IF POLANGLE CAL HAS FULL STOKES MODEL
+    # =========================================================================
+    if cal_plan['polangle_cal']:
+        has_full_stokes = matcher.has_full_stokes_model(cal_plan['polangle_cal'])
+        cal_plan['polangle_has_full_stokes_model'] = has_full_stokes
+        if has_full_stokes:
+            logger.info(f"Pol angle cal {cal_plan['polangle_cal']}: has full Stokes model (can use for gain)")
+        else:
+            logger.info(f"Pol angle cal {cal_plan['polangle_cal']}: no full Stokes model")
+
+    # =========================================================================
+    # BUILD GAIN CALIBRATORS LIST
+    # For linear feeds: only include polarized sources if they have full Stokes model
+    # For circular feeds: use all calibrators
+    # =========================================================================
+    pol_basis = cal_plan['pol_basis']
+    gain_cals = set()
+
+    # Always include flux cal and phase cal (typically unpolarized or have models)
+    if cal_plan['flux_cal']:
+        for c in cal_plan['flux_cal'].split(','):
+            cal_name = c.strip()
+            if pol_basis == 'linear':
+                # For linear: only include if unpolarized OR has full Stokes model
+                if matcher.is_known_unpolarized(cal_name) or matcher.has_full_stokes_model(cal_name):
+                    gain_cals.add(cal_name)
+                elif not matcher.is_known_polarized(cal_name):
+                    # Unknown polarization status - assume ok for gain
+                    gain_cals.add(cal_name)
+                else:
+                    logger.warning(f"Linear feeds: excluding {cal_name} from gain cal (polarized, no model)")
+            else:
+                gain_cals.add(cal_name)
+
+    if cal_plan['phase_cal']:
+        for c in cal_plan['phase_cal'].split(','):
+            cal_name = c.strip()
+            if pol_basis == 'linear':
+                if matcher.is_known_unpolarized(cal_name) or matcher.has_full_stokes_model(cal_name):
+                    gain_cals.add(cal_name)
+                elif not matcher.is_known_polarized(cal_name):
+                    gain_cals.add(cal_name)
+                else:
+                    logger.warning(f"Linear feeds: excluding {cal_name} from gain cal (polarized, no model)")
+            else:
+                gain_cals.add(cal_name)
+
+    # For polangle_cal: include in gain only if has full Stokes model (both feed types)
+    if cal_plan['polangle_cal'] and cal_plan['polangle_has_full_stokes_model']:
+        gain_cals.add(cal_plan['polangle_cal'])
+        logger.info(f"Including {cal_plan['polangle_cal']} in gain cal (has full Stokes model)")
+
+    cal_plan['gain_calibrators'] = sorted(list(gain_cals))
+    logger.info(f"Gain calibrators: {cal_plan['gain_calibrators']}")
+
     # =========================================================================
     # LEAKAGE CALIBRATOR STATUS
     # =========================================================================
@@ -453,5 +540,5 @@ def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
             logger.info(f"Leakage cal {cal_plan['leakage_cal']}: known polarized source")
         else:
             logger.info(f"Leakage cal {cal_plan['leakage_cal']}: assuming unpolarized (not in catalog)")
-    
+
     return cal_plan

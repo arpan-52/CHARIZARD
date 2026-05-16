@@ -12,7 +12,7 @@ from .antenna_analysis import (
 from .flag_commands import write_flag_commands
 from .initial_flagger import run_initial_flagging
 from .catboss import run_catboss
-from .nami import run_nami
+from .nimki import run_nimki
 
 __all__ = [
     'find_dead_antennas',
@@ -22,5 +22,5 @@ __all__ = [
     'write_flag_commands',
     'run_initial_flagging',
     'run_catboss',
-    'run_nami',
+    'run_nimki',
 ]

@@ -1,8 +1,8 @@
-# charizard/utils/flagging_utils/nami.py
+# charizard/utils/flagging_utils/nimki.py
 """
-NAMI flagger interface.
+NIMKI flagger interface.
 
-CPU-based polynomial fitting flagger for post-calibration data.
+CPU-based UV-domain Gabor flagger (catboss nimki) for post-calibration data.
 """
 
 import os
@@ -14,49 +14,41 @@ from housekeeper import Housekeeper
 from ..container import build_udocker_prefix
 
 
-# Hardcoded NAMI defaults
-# Note: timebin is in MINUTES
-NAMI_DEFAULTS = {
+# Hardcoded nimki defaults (matches catboss nimki defaults)
+NIMKI_DEFAULTS = {
     'sigma': 5.0,
-    'nknots': 2,
-    'timebin': 30.0,  # minutes
-}
-
-# For selfcal residual flagging
-NAMI_SELFCAL_DEFAULTS = {
-    'sigma': 5.0,
-    'nknots': 3,
-    'timebin': 10.0,  # minutes
+    'n_components': 5,  # Gabor components
+    'timebin': 30.0,    # minutes
 }
 
 
-def build_nami_command(ms_path: str,
-                       datacolumn: str = 'CORRECTED_DATA',
-                       sigma: float = None,
-                       nknots: int = None,
-                       timebin: float = None,
-                       ncpu: int = 8,
-                       field: str = None,
-                       corr: str = None) -> str:
+def build_nimki_command(ms_path: str,
+                        datacolumn: str = 'CORRECTED_DATA',
+                        sigma: float = None,
+                        n_components: int = None,
+                        timebin: float = None,
+                        ncpu: int = 8,
+                        field: str = None,
+                        corr: str = None) -> str:
     """
-    Build catboss nimki command string (replaces nami).
+    Build catboss nimki command string.
 
     Args:
-        ms_path:    Path to measurement set
-        datacolumn: Data column to flag
-        sigma:      Sigma threshold
-        nknots:     Number of Gabor components (maps to --n-components)
-        timebin:    Time bin in minutes
-        ncpu:       Number of CPUs (0 = all)
-        field:      Field selection
-        corr:       Correlation selection
+        ms_path:      Path to measurement set
+        datacolumn:   Data column to flag
+        sigma:        Sigma threshold (default 5.0)
+        n_components: Number of Gabor components (default 5)
+        timebin:      Time bin in minutes (default 30.0)
+        ncpu:         Number of CPUs (0 = all)
+        field:        Field selection
+        corr:         Correlation selection
 
     Returns:
         catboss nimki command string
     """
-    sigma = sigma or NAMI_DEFAULTS['sigma']
-    n_components = nknots or NAMI_DEFAULTS['nknots']
-    timebin = timebin or NAMI_DEFAULTS['timebin']
+    sigma = sigma or NIMKI_DEFAULTS['sigma']
+    n_components = n_components or NIMKI_DEFAULTS['n_components']
+    timebin = timebin or NIMKI_DEFAULTS['timebin']
 
     cmd = f"catboss nimki {ms_path}"
     cmd += f" --datacolumn {datacolumn}"
@@ -74,19 +66,21 @@ def build_nami_command(ms_path: str,
     return cmd
 
 
-def run_nami(hk: Housekeeper,
-             config,
-             active_spws: List[str],
-             ms_names: List[str],
-             datacolumn: str,
-             logger,
-             whitelist: List[str],
-             sigma: float = None,
-             wait: bool = True,
-             prefix: str = '') -> Optional[List[str]]:
+def run_nimki(hk: Housekeeper,
+              config,
+              active_spws: List[str],
+              ms_names: List[str],
+              datacolumn: str,
+              logger,
+              whitelist: List[str],
+              sigma: float = None,
+              n_components: int = None,
+              timebin: float = None,
+              wait: bool = True,
+              prefix: str = '') -> Optional[List[str]]:
     """
-    Run NAMI flagging.
-    
+    Run nimki flagging (catboss nimki).
+
     Args:
         hk: Housekeeper instance
         config: PipelineConfig
@@ -95,46 +89,48 @@ def run_nami(hk: Housekeeper,
         datacolumn: Data column to flag
         logger: Logger
         whitelist: Error whitelist
-        sigma: Sigma threshold (default from NAMI_DEFAULTS)
+        sigma: Sigma threshold (default 5.0)
+        n_components: Gabor components (default 5)
+        timebin: Time bin in minutes (default 30.0)
         wait: Whether to wait for jobs to complete
         prefix: Job name prefix
-    
+
     Returns:
         List of successful SPWs (if wait=True) or job_ids (if wait=False)
     """
-    logger.substep(f"Running NAMI on {ms_names}...")
-    
+    logger.substep(f"Running nimki on {ms_names}...")
+
     env = config.environment
     preamble = env.get('shell_preamble', '')
     resources = config.resources.get('flagging', config.resources.get('default', {}))
     ppn = resources.get('ppn', 8)
-    
+
     job_ids = []
     job_map = {}
-    
+
     for spw in active_spws:
         commands = []
-        
+
         for ms in ms_names:
             ms_path = f"{spw}/{ms}"
-            
+
             if not os.path.exists(ms_path):
                 continue
-            
-            cmd = build_nami_command(
+
+            cmd = build_nimki_command(
                 ms_path=ms_path,
                 datacolumn=datacolumn,
                 sigma=sigma,
-                nknots=NAMI_DEFAULTS['nknots'],
-                timebin=NAMI_DEFAULTS['timebin'],
+                n_components=n_components,
+                timebin=timebin,
                 ncpu=ppn
             )
             commands.append(cmd)
-        
+
         if not commands:
             continue
-        
-        job_name = f"nami_{prefix}_{spw}" if prefix else f"nami_{spw}"
+
+        job_name = f"nimki_{prefix}_{spw}" if prefix else f"nimki_{spw}"
         udocker = build_udocker_prefix(config)
         batch_script = f"\n{udocker} ".join(commands)
 
@@ -142,7 +138,7 @@ def run_nami(hk: Housekeeper,
 {preamble}
 {udocker} {batch_script}
 """
-        
+
         job = hk.submit(
             command=command,
             name=job_name,
@@ -150,36 +146,36 @@ def run_nami(hk: Housekeeper,
             ppn=ppn,
             walltime=resources.get('walltime', '04:00:00')
         )
-        
+
         if job.job_id:
             job_ids.append(job.job_id)
             job_map[job.job_id] = spw
             logger.info(f"Submitted {job_name}: {job.job_id}")
-        
+
         time.sleep(0.5)
-    
+
     if not job_ids:
-        logger.warning("No NAMI jobs submitted")
+        logger.warning("No nimki jobs submitted")
         return active_spws if wait else []
-    
+
     if not wait:
         return job_ids
-    
+
     # Wait for jobs
-    logger.substep(f"Waiting for {len(job_ids)} NAMI jobs...")
+    logger.substep(f"Waiting for {len(job_ids)} nimki jobs...")
     results = hk.wait_and_check(job_ids, whitelist=whitelist)
-    
+
     successful = []
     failed = []
-    
+
     for job_id, (job, log_result) in results.items():
         spw = job_map.get(job_id, 'unknown')
-        
+
         if log_result.success:
             successful.append(spw)
             logger.info(f"{spw}: OK")
         else:
             failed.append(spw)
-            logger.warning(f"{spw}: FAILED (nami)")
-    
+            logger.warning(f"{spw}: FAILED (nimki)")
+
     return successful if successful else None

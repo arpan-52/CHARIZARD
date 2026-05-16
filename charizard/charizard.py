@@ -13,7 +13,7 @@ Flow:
 5. RFI flagging on calibrators (catboss)
 6. Find best refant ← AFTER flagging for clean data
 7. Calibration round 1 + Source flagging (parallel)
-8. Post-cal flagging (catboss + nami)
+8. Post-cal flagging (catboss + nimki)
 9. Calibration round 2
 10. Apply to both, final flagging
 11. Diagnostic plots (if requested)
@@ -34,7 +34,7 @@ from .utils.splitting_utils.splitter import run_split
 from .utils.flagging_utils.antenna_analysis import run_bad_antenna_detection, run_find_refant
 from .utils.flagging_utils.initial_flagger import run_initial_flagging
 from .utils.flagging_utils.catboss import run_catboss
-from .utils.flagging_utils.nami import run_nami
+from .utils.flagging_utils.nimki import run_nimki
 from .utils.flagging_utils.flag_commands import write_flag_commands
 from .utils.calibration_utils.gains import run_calibration
 from .utils.calibration_utils.applycal import run_applycal
@@ -184,6 +184,9 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         'do_polcal': do_polcal,
         'num_correlations': 4 if do_polcal else 2,
         'correlation_names': ms_info.get('corr_names', []),
+        'pol_basis': cal_plan.get('pol_basis', 'circular'),
+        'gain_calibrators': cal_plan.get('gain_calibrators', []),
+        'polangle_has_full_stokes_model': cal_plan.get('polangle_has_full_stokes_model', False),
         'active_spws': active_spws,
         'refant': None,  # Will be updated after refant step
     }
@@ -449,8 +452,8 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         prefix='postcal'
     )
     
-    # NAMI
-    run_nami(
+    # NIMKI
+    run_nimki(
         hk=hk,
         config=config,
         active_spws=active_spws,
@@ -556,7 +559,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     
     # =========================================================================
     # STEP 11: FINAL FLAGGING
-    # All catboss in parallel, then all nami in parallel
+    # All catboss in parallel, then all nimki in parallel
     # =========================================================================
     logger.step("FINAL FLAGGING")
     
@@ -578,9 +581,9 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         prefix='final'
     )
     
-    # Nami on ALL (cal.ms + src.ms) in parallel
-    logger.substep(f"Running NAMI on {ms_to_flag}...")
-    run_nami(
+    # Nimki on ALL (cal.ms + src.ms) in parallel
+    logger.substep(f"Running NIMKI on {ms_to_flag}...")
+    run_nimki(
         hk=hk,
         config=config,
         active_spws=active_spws,
@@ -621,6 +624,8 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     # STEP 13: IMAGING + SELF-CALIBRATION (if configured)
     # =========================================================================
     selfcal_success = True
+    ms_map_result = None
+    selfcal_final_images = None
     if flow.get('imaging_selfcal'):
         from .utils.selfcal_utils.prepare import prepare_selfcal_ms
         from .utils.selfcal_utils.imaging import run_dirty_image, run_wsclean
@@ -658,11 +663,11 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             if not selfcal_brotherhood:
                 return False
         else:
-            # Initial flagging on selfcal MS - use proper catboss (GPU) + nami (CPU)
+            # Initial flagging on selfcal MS - use proper catboss (GPU) + nimki (CPU)
             if selfcal_config.get('avg_flag', True):
                 logger.substep("Initial flagging on selfcal MS...")
                 
-                # Convert ms_map to format for run_catboss/run_nami
+                # Convert ms_map to format for run_catboss/run_nimki
                 # ms_map: {field: [spw0/field/sc.ms, spw1/field/sc.ms, ...]}
                 # Need: active_spws = [spw0, spw1, ...], ms_names = [field/sc.ms]
                 spw_ms_map = {}
@@ -700,9 +705,9 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                     else:
                         active_spws_sc = result_spws
                     
-                    # Nami (CPU)
-                    logger.substep("Running nami on selfcal MS...")
-                    result_spws = run_nami(
+                    # Nimki (CPU)
+                    logger.substep("Running nimki on selfcal MS...")
+                    result_spws = run_nimki(
                         hk=hk,
                         config=config,
                         active_spws=active_spws_sc,
@@ -715,7 +720,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                     )
                     
                     if result_spws is None:
-                        logger.warning("Nami failed on all SPWs")
+                        logger.warning("Nimki failed on all SPWs")
                     
                     logger.info("Initial selfcal flagging complete")
             
@@ -757,7 +762,11 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     # =========================================================================
     # STEP 14: DIRECTION-DEPENDENT CALIBRATION (if configured)
     # =========================================================================
-    if flow.get('dd_cal') and selfcal_success:
+    if flow.get('dd_cal') and not flow.get('imaging_selfcal'):
+        logger.error("dd_cal requires imaging_selfcal to run first - skipping DDCal")
+        pipeline_status['failed_steps'].append('ddcal')
+
+    if flow.get('dd_cal') and flow.get('imaging_selfcal') and selfcal_success:
         from .utils.ddcal_utils.concat import concat_ms
         from .utils.ddcal_utils.pybdsf_runner import run_pybdsf
         from .utils.ddcal_utils.source_matcher import (
