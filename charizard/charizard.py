@@ -68,7 +68,6 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     flow = config.flow
     init_cal = flow.get('initial_calibration_flagging', {})
     setup = init_cal.get('setup', {})
-    flagging = init_cal.get('flagging', {})
     calibration = init_cal.get('calibration', {})
     control = calibration.get('control', {})
     
@@ -115,6 +114,12 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         logger.info(f"Pol angle cal: {cal_plan['polangle_cal']}")
     logger.info(f"Targets: {', '.join(cal_plan['targets']) if cal_plan['targets'] else 'None'}")
     logger.info(f"All calibrators: {cal_plan['all_calibrators']}")
+
+    if not cal_plan.get('flux_cal'):
+        logger.error("No flux calibrator found in MS or overrides - cannot calibrate!")
+        logger.error("Set sources.overrides.calibrators.amp in the config.")
+        pipeline_status['failed_steps'].append('analyze')
+        return False
     
     # Check if polcal possible
     do_polcal = (cal_plan.get('leakage_cal') and 
@@ -420,6 +425,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             return False
     
     # Apply to calibrators
+    prev_spws = active_spws.copy()
     active_spws = run_applycal(
         hk=hk,
         config=config,
@@ -430,7 +436,21 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         logger=logger,
         whitelist=whitelist
     )
-    
+
+    if active_spws is None:
+        logger.error("ALL SPWs failed applycal (round 1)!")
+        pipeline_status['failed_steps'].append('cal1')
+        return False
+
+    failed_spws = set(prev_spws) - set(active_spws)
+    if failed_spws:
+        if brotherhood:
+            logger.error(f"Brotherhood=True, SPWs failed applycal: {failed_spws}, stopping!")
+            pipeline_status['failed_steps'].append('cal1')
+            return False
+        else:
+            logger.warning(f"Removed failed SPWs: {failed_spws}, continuing with: {active_spws}")
+
     logger.success("Calibration round 1 complete")
     pipeline_status['completed_steps'].append('cal1')
     
@@ -502,7 +522,8 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             logger.warning(f"Removed failed SPWs: {failed_spws}, continuing with: {active_spws}")
     
     # Apply to calibrators
-    run_applycal(
+    prev_spws = active_spws.copy()
+    active_spws = run_applycal(
         hk=hk,
         config=config,
         active_spws=active_spws,
@@ -512,7 +533,21 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         logger=logger,
         whitelist=whitelist
     )
-    
+
+    if active_spws is None:
+        logger.error("ALL SPWs failed applycal (round 2)!")
+        pipeline_status['failed_steps'].append('cal2')
+        return False
+
+    failed_spws = set(prev_spws) - set(active_spws)
+    if failed_spws:
+        if brotherhood:
+            logger.error(f"Brotherhood=True, SPWs failed applycal: {failed_spws}, stopping!")
+            pipeline_status['failed_steps'].append('cal2')
+            return False
+        else:
+            logger.warning(f"Removed failed SPWs: {failed_spws}, continuing with: {active_spws}")
+
     logger.success("Calibration round 2 complete")
     pipeline_status['completed_steps'].append('cal2')
     
@@ -543,7 +578,8 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             logger.info("No source flagging jobs were running")
         
         # Apply calibration to targets
-        run_applycal(
+        prev_spws = active_spws.copy()
+        apply_result = run_applycal(
             hk=hk,
             config=config,
             active_spws=active_spws,
@@ -553,7 +589,22 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             logger=logger,
             whitelist=whitelist
         )
-        
+
+        if apply_result is None:
+            logger.error("ALL SPWs failed applycal to targets!")
+            pipeline_status['failed_steps'].append('apply_targets')
+            return False
+
+        failed_spws = set(prev_spws) - set(apply_result)
+        if failed_spws:
+            if brotherhood:
+                logger.error(f"Brotherhood=True, SPWs failed applycal to targets: {failed_spws}, stopping!")
+                pipeline_status['failed_steps'].append('apply_targets')
+                return False
+            else:
+                logger.warning(f"Applycal to targets failed for: {failed_spws}, continuing with: {apply_result}")
+                active_spws = apply_result
+
         logger.success("Applied to targets")
         pipeline_status['completed_steps'].append('apply_targets')
     
@@ -606,7 +657,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         
         logger.step("GENERATING DIAGNOSTIC PLOTS")
         
-        run_diagnostic_plots(
+        plots_ok = run_diagnostic_plots(
             hk=hk,
             config=config,
             active_spws=active_spws,
@@ -616,9 +667,13 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             whitelist=whitelist,
             plot_targets=bool(cal_plan['targets'])
         )
-        
-        logger.success("Diagnostic plots complete")
-        pipeline_status['completed_steps'].append('plotting')
+
+        if plots_ok:
+            logger.success("Diagnostic plots complete")
+            pipeline_status['completed_steps'].append('plotting')
+        else:
+            logger.error("Diagnostic plotting failed")
+            pipeline_status['failed_steps'].append('plotting')
     
     # =========================================================================
     # STEP 13: IMAGING + SELF-CALIBRATION (if configured)
@@ -660,7 +715,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
             logger.error("Failed to prepare MS for selfcal!")
             pipeline_status['failed_steps'].append('selfcal')
             selfcal_success = False
-            if not selfcal_brotherhood:
+            if selfcal_brotherhood:
                 return False
         else:
             # Initial flagging on selfcal MS - use proper catboss (GPU) + nimki (CPU)
@@ -782,9 +837,11 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         
         flux_threshold = source_finding.get('flux_threshold_mJy', 50)
         region_radius = source_finding.get('region_radius_arcsec', 15.0)
-        
+        min_distance_fraction = source_finding.get('min_distance_fraction', 0.1)
+
         logger.info(f"Flux threshold: {flux_threshold} mJy")
         logger.info(f"Region radius: {region_radius} arcsec")
+        logger.info(f"Inner exclusion: {min_distance_fraction:.0%} of image half-width")
         
         # Get ms_map from selfcal results
         if ms_map_result:
@@ -848,9 +905,11 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                         pipeline_status['failed_steps'].append('ddcal')
                     else:
                         # Step 3: Find bright sources and create region files
+                        ddcal_failed_fields = []
                         for field in combined_ms_map.keys():
                             if field not in pybdsf_results:
                                 logger.warning(f"No PyBDSF results for {field}")
+                                ddcal_failed_fields.append(field)
                                 continue
                             
                             logger.substep(f"Processing field {field}...")
@@ -866,6 +925,8 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                                 output_dir=output_dir,
                                 flux_threshold_mJy=flux_threshold,
                                 region_radius_arcsec=region_radius,
+                                image_file=stokes_i_images.get(field),
+                                min_distance_fraction=min_distance_fraction,
                                 logger=logger
                             )
                             
@@ -894,9 +955,14 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                                 logger.success(f"{field}: DDCal complete!")
                             else:
                                 logger.error(f"{field}: DDCal failed")
-                        
-                        pipeline_status['completed_steps'].append('ddcal')
-                        logger.success("DDCal complete!")
+                                ddcal_failed_fields.append(field)
+
+                        if ddcal_failed_fields:
+                            pipeline_status['failed_steps'].append('ddcal')
+                            logger.error(f"DDCal failed for fields: {ddcal_failed_fields}")
+                        else:
+                            pipeline_status['completed_steps'].append('ddcal')
+                            logger.success("DDCal complete!")
     # =========================================================================
     # PIPELINE SUMMARY
     # =========================================================================

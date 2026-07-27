@@ -6,12 +6,12 @@
 #SBATCH --time=2-00:00:00
 #SBATCH --export=ALL
 #SBATCH --mail-type=END,FAIL
-#SBATCH -D /lustre/aoc/students/apal/a725
-#SBATCH --output=/lustre/aoc/students/apal/a725/charizard_master.out
-#SBATCH --error=/lustre/aoc/students/apal/a725/charizard_master.err
+#SBATCH -D /path/to/working_dir                       # UPDATE: same as working_dir in pokedex.yaml
+#SBATCH --output=/path/to/working_dir/charizard_master.out
+#SBATCH --error=/path/to/working_dir/charizard_master.err
 
-source /lustre/aoc/students/apal/start.sh
-micromamba activate 312data
-export UDOCKER_DIR=/lustre/aoc/students/apal/udocker
+source ~/.bashrc
+micromamba activate 312data                           # UPDATE: env with charizard + udocker
+export UDOCKER_DIR=/path/to/udocker                   # UPDATE: udocker dir
 
-charizard run pokedex.yaml -s scheduler.yaml
+charizard run pokedex.yaml                            # add "-s scheduler.yaml" for a custom scheduler config

@@ -8,7 +8,9 @@ import time
 from typing import List, Optional, Dict
 
 from housekeeper import Housekeeper
+from ..general.resources import submit_resources
 from ..container import build_udocker_prefix
+from .gains import get_fluxscale_lists
 
 
 def build_applycal_script(spw: str,
@@ -93,13 +95,18 @@ def build_applycal_script(spw: str,
         ms_path = f"{spw}/src.ms"
         interp = "['linear'] * " + str(num_tables)
     
+    # For linear feeds the parallactic angle correction is a real X/Y rotation,
+    # so it needs cross-hands to be meaningful. Without polcal the MS holds only
+    # XX,YY and the rotation is undefined - match the solve and leave it off.
+    parang = 'True' if (pol_basis != 'linear' or do_polcal) else 'False'
+
     script = f"""# Apply calibration to {target_type}
 applycal(vis='{ms_path}',
     field='{field_list}',
     gaintable={gaintables_str},
     gainfield=['nearest'] * {num_tables},
     interp={interp},
-    parang=True,
+    parang={parang},
     calwt=True,
     flagbackup=True)
 
@@ -138,7 +145,6 @@ def run_applycal(hk: Housekeeper,
     logger.substep(f"Applying calibration to {target_type}...")
     
     env = config.environment
-    casa_path = env.get('casa_path', '')
     preamble = env.get('shell_preamble', '')
     resources = config.resources.get('crosscal', config.resources.get('default', {}))
     ppn = resources.get('ppn', 4)
@@ -148,12 +154,9 @@ def run_applycal(hk: Housekeeper,
                  cal_plan.get('polangle_cal') and 
                  cal_plan.get('polangle_cal') in cal_plan.get('polcal_models', {}))
     
-    # Check fluxscale
-    flux_cal = cal_plan.get('flux_cal', '')
-    phase_cal = cal_plan.get('phase_cal', '')
-    amp_cal_list = [c.strip() for c in flux_cal.split(',') if c.strip()]
-    phase_cal_list = [c.strip() for c in phase_cal.split(',') if c.strip()] if phase_cal else []
-    do_fluxscale = any(c not in amp_cal_list for c in phase_cal_list)
+    # Check fluxscale - same decision as the solve in gains.py
+    _, _, transfer_list = get_fluxscale_lists(cal_plan, do_polcal)
+    do_fluxscale = len(transfer_list) > 0
     
     job_ids = []
     job_map = {}
@@ -188,8 +191,7 @@ def run_applycal(hk: Housekeeper,
             command=command,
             name=f"apply_{target_type[0]}_{cal_round}_{spw}",
             job_subdir=spw,
-            ppn=ppn,
-            walltime="02:00:00"
+            **submit_resources(resources, walltime='02:00:00', ppn=ppn)
         )
         
         if job.job_id:

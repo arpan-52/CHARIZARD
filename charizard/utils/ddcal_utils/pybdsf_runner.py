@@ -9,6 +9,7 @@ import time
 from typing import List, Dict, Optional
 
 from housekeeper import Housekeeper
+from ..general.resources import submit_resources
 from ..container import build_udocker_prefix
 
 
@@ -109,8 +110,7 @@ print(f"Found {{img.nsrc}} sources in {{img.nisl}} islands")
             command=command,
             name=f"pybdsf_{field}",
             job_subdir=field_dir,
-            ppn=ppn,
-            walltime=resources.get('walltime', '01:00:00')
+            **submit_resources(resources, '01:00:00', ppn=ppn)
         )
         
         if job.job_id:

@@ -1,0 +1,33 @@
+# Scheduler config for NCRA Bhima cluster (OpenPBS)
+# Usage: charizard run pokedex_bhima.yaml -s scheduler_bhima.yaml
+
+scheduler: pbs
+
+job_dir: ./jobs     # job scripts and PBS logs land here
+
+pbs:
+  # bhima uses OpenPBS (modern select syntax)
+  resource_style: select
+
+  queues:
+    default: workq  # normal CPU queue
+    gpu: gpu        # bhima04 is in this queue
+
+  gpu:
+    enabled: true
+    host: bhima04   # the one GPU node on bhima
+    ngpus: 1
+    modules:
+      - cuda/12.3   # UPDATE if bhima has a different CUDA module name
+
+  # Added to every PBS job header
+  directives:
+    - "-V"          # export all env vars (picks up micromamba activation)
+    - "-j oe"       # merge stdout+stderr into one log file
+
+  # Modules loaded in every job
+  modules: []       # add cluster-wide modules here if needed (e.g. - gcc/11.3)
+
+  # Environment variables propagated to every job
+  env_vars:
+    OMP_NUM_THREADS: "8"

@@ -8,12 +8,18 @@ Antenna analysis utilities.
 import os
 import time
 import json
+import warnings
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 from multiprocessing import Pool
 
 from casacore import tables
+from ..general.resources import submit_resources
+
+# Peak bytes of DATA+FLAG held in memory per read. Sized so that ppn parallel
+# workers stay well inside a normal node allocation.
+CHUNK_BYTES = 256 * 1024 ** 2
 
 
 def remove_table_lock(ms_path: str):
@@ -51,153 +57,190 @@ def get_ms_info_for_antenna(ms_path: str):
         remove_table_lock(ms_path)
 
 
+def _parallel_hand_indices(npols: int):
+    """Correlation indices of the parallel hands (RR/LL or XX/YY)."""
+    if npols == 4:
+        return [0, 3]
+    if npols == 2:
+        return [0, 1]
+    return [0]
+
+
+def _read_row_amplitudes(sel, npols: int, chunk_bytes: int = CHUNK_BYTES,
+                         max_rows: int = None):
+    """Collapse each row's parallel-hand amplitude to one number, in chunks.
+
+    The per-channel amplitudes are only ever used to take a median, so
+    collapsing the channel axis up front turns an nrow x nchan x npol array
+    into one float per row. On a 64-antenna MeerKAT block that is the
+    difference between a few MB and tens of GB.
+
+    The collapse is a median, not a mean, to stay faithful to the original
+    per-channel statistic: a mean would let an antenna that is dead across
+    only part of the band average back above the detection threshold, and
+    would be pulled around by narrowband RFI.
+
+    Returns:
+        (row_amp, n_valid, n_total) - one entry per row. row_amp is NaN for
+        rows with no unflagged channel.
+    """
+    nrows = sel.nrows() if max_rows is None else min(sel.nrows(), max_rows)
+    pols = _parallel_hand_indices(npols)
+
+    # Size the chunk by bytes, not rows - nchan varies by orders of magnitude
+    # between a 1k VLA spw and a 32k MeerKAT one.
+    shape = sel.getcell('DATA', 0).shape          # (nchan, npol)
+    nchan = int(shape[0])
+    bytes_per_row = nchan * npols * (8 + 1)       # complex64 DATA + bool FLAG
+    chunk_rows = max(1, int(chunk_bytes // max(bytes_per_row, 1)))
+
+    row_amp = np.empty(nrows, dtype=np.float64)
+    n_valid = np.empty(nrows, dtype=np.int64)
+
+    for start in range(0, nrows, chunk_rows):
+        n = min(chunk_rows, nrows - start)
+        data = sel.getcol('DATA', start, n)        # (n, nchan, npol)
+        flag = sel.getcol('FLAG', start, n)
+
+        amp = np.abs(data[:, :, pols]).mean(axis=2)      # (n, nchan)
+        valid = ~flag[:, :, pols].any(axis=2)            # (n, nchan)
+
+        # Median over unflagged channels. Stay in float32 so the masked copy
+        # does not silently double this chunk's footprint.
+        masked = np.where(valid, amp, np.float32('nan'))
+        with warnings.catch_warnings():
+            # all-flagged rows are expected and become NaN, which is the signal
+            warnings.simplefilter('ignore', RuntimeWarning)
+            row_amp[start:start + n] = np.nanmedian(masked, axis=1)
+
+        n_valid[start:start + n] = valid.sum(axis=1)
+
+        del data, flag, amp, valid, masked
+
+    n_total = np.full(nrows, nchan, dtype=np.int64)
+    return row_amp, n_valid, n_total
+
+
+def _grouped_medians(keys: np.ndarray, values: np.ndarray, n_keys: int):
+    """Median of `values` per key, ignoring NaNs. NaN where a key has no data.
+
+    Sorts once and splits, rather than masking the full array per key.
+    """
+    medians = np.full(n_keys, np.nan)
+
+    finite = np.isfinite(values)
+    if not finite.any():
+        return medians
+
+    k = keys[finite]
+    v = values[finite]
+
+    order = np.argsort(k, kind='stable')
+    k = k[order]
+    v = v[order]
+
+    boundaries = np.flatnonzero(np.diff(k)) + 1
+    for group_keys, group_vals in zip(np.split(k, boundaries), np.split(v, boundaries)):
+        if group_vals.size:
+            medians[group_keys[0]] = np.median(group_vals)
+
+    return medians
+
+
 def process_spw_field(params):
     """Process one SPW/field combination for bad antenna detection."""
     ms_path, spw, field, ant_names, mock_ants = params
-    
+
     try:
         with tables.table(ms_path, ack=False) as tb:
-            sel = tb.query(f"DATA_DESC_ID = {spw} AND FIELD_ID = {field}", sortlist='SCAN_NUMBER')
-            
+            sel = tb.query(f"DATA_DESC_ID = {spw} AND FIELD_ID = {field}",
+                           sortlist='SCAN_NUMBER')
+
             if sel.nrows() == 0:
                 sel.close()
                 return None
-            
-            scans = sel.getcol('SCAN_NUMBER')
-            ant1 = sel.getcol('ANTENNA1')
-            ant2 = sel.getcol('ANTENNA2')
-            data = sel.getcol('DATA')
-            flags = sel.getcol('FLAG')
-            sel.close()
-            
-            unique_scans = np.unique(scans)
+
+            try:
+                scans = sel.getcol('SCAN_NUMBER')
+                ant1 = sel.getcol('ANTENNA1')
+                ant2 = sel.getcol('ANTENNA2')
+                npols = int(sel.getcell('DATA', 0).shape[-1])
+
+                row_amp, n_valid, n_total = _read_row_amplitudes(sel, npols)
+            finally:
+                sel.close()
+
             num_ants = len(ant_names)
-            npols = data.shape[-1]
-            
-            scan_bad_antennas = {}
-            
-            # First pass: calculate global reference amplitude
-            global_ant_stats = defaultdict(lambda: {'valid_amplitudes': [], 'is_active': False})
-            
-            for i in range(len(data)):
-                a1, a2 = ant1[i], ant2[i]
-                
-                if npols == 4:
-                    pol_flags = flags[i, :, 0] | flags[i, :, 3]
-                    valid_mask = ~pol_flags
-                    if np.any(valid_mask):
-                        amp = (np.abs(data[i, valid_mask, 0]) + np.abs(data[i, valid_mask, 3])) / 2
-                    else:
-                        continue
-                elif npols == 2:
-                    pol_flags = flags[i, :, 0] | flags[i, :, 1]
-                    valid_mask = ~pol_flags
-                    if np.any(valid_mask):
-                        amp = (np.abs(data[i, valid_mask, 0]) + np.abs(data[i, valid_mask, 1])) / 2
-                    else:
-                        continue
-                else:
-                    valid_mask = ~flags[i, :, 0]
-                    if np.any(valid_mask):
-                        amp = np.abs(data[i, valid_mask, 0])
-                    else:
-                        continue
-                
-                for ant in [a1, a2]:
-                    global_ant_stats[ant]['is_active'] = True
-                    global_ant_stats[ant]['valid_amplitudes'].extend(amp.tolist())
-            
-            # Calculate global reference
-            good_amps = []
-            for ant in range(num_ants):
-                stats = global_ant_stats[ant]
-                if stats['is_active'] and len(stats['valid_amplitudes']) > 0:
-                    med_amp = np.median(stats['valid_amplitudes'])
-                    if med_amp > 0:
-                        good_amps.append(med_amp)
-            
-            if not good_amps:
+
+            # Every row contributes to both of its antennas
+            ants = np.concatenate([ant1, ant2])
+            row_scans = np.tile(scans, 2)
+            amps = np.tile(row_amp, 2)
+            valid = np.tile(n_valid, 2)
+            total = np.tile(n_total, 2)
+
+            unique_scans, scan_idx = np.unique(row_scans, return_inverse=True)
+
+            # ---- global reference amplitude (per-antenna median over all scans)
+            ant_medians = _grouped_medians(ants, amps, num_ants)
+            good_amps = ant_medians[np.isfinite(ant_medians) & (ant_medians > 0)]
+
+            if good_amps.size == 0:
                 return None
-            
-            reference_amp = np.percentile(good_amps, 75)
+
+            reference_amp = float(np.percentile(good_amps, 75))
             threshold = reference_amp * 0.05
-            
-            # Second pass: per-scan analysis
-            for scan in unique_scans:
-                scan_mask = scans == scan
-                scan_indices = np.where(scan_mask)[0]
-                
-                if len(scan_indices) == 0:
-                    continue
-                
-                scan_ant_stats = defaultdict(lambda: {
-                    'total_samples': 0,
-                    'flagged_samples': 0,
-                    'valid_amplitudes': [],
-                    'is_active': False
-                })
-                
-                for idx in scan_indices:
-                    a1, a2 = ant1[idx], ant2[idx]
-                    
-                    if npols == 4:
-                        pol_flags = flags[idx, :, 0] | flags[idx, :, 3]
-                        valid_mask = ~pol_flags
-                        if np.any(valid_mask):
-                            amp = (np.abs(data[idx, valid_mask, 0]) + np.abs(data[idx, valid_mask, 3])) / 2
-                        else:
-                            amp = np.array([])
-                    elif npols == 2:
-                        pol_flags = flags[idx, :, 0] | flags[idx, :, 1]
-                        valid_mask = ~pol_flags
-                        if np.any(valid_mask):
-                            amp = (np.abs(data[idx, valid_mask, 0]) + np.abs(data[idx, valid_mask, 1])) / 2
-                        else:
-                            amp = np.array([])
-                    else:
-                        valid_mask = ~flags[idx, :, 0]
-                        if np.any(valid_mask):
-                            amp = np.abs(data[idx, valid_mask, 0])
-                        else:
-                            amp = np.array([])
-                    
-                    for ant in [a1, a2]:
-                        scan_ant_stats[ant]['is_active'] = True
-                        scan_ant_stats[ant]['total_samples'] += len(valid_mask)
-                        scan_ant_stats[ant]['flagged_samples'] += np.sum(~valid_mask)
-                        if len(amp) > 0:
-                            scan_ant_stats[ant]['valid_amplitudes'].extend(amp.tolist())
-                
+
+            # ---- per (scan, antenna) statistics
+            keys = scan_idx * num_ants + ants
+            n_keys = len(unique_scans) * num_ants
+
+            scan_ant_medians = _grouped_medians(keys, amps, n_keys)
+            flagged = np.bincount(keys, weights=(total - valid), minlength=n_keys)
+            sampled = np.bincount(keys, weights=total, minlength=n_keys)
+
+            with np.errstate(invalid='ignore', divide='ignore'):
+                flag_percent = np.where(sampled > 0, 100.0 * flagged / sampled, 100.0)
+
+            mock_set = set(int(a) for a in mock_ants)
+            scan_bad_antennas = {}
+
+            for s, scan in enumerate(unique_scans):
                 scan_bad_ants = []
                 for ant in range(num_ants):
-                    stats = scan_ant_stats[ant]
-                    if stats['is_active'] and len(stats['valid_amplitudes']) > 0 and ant not in mock_ants:
-                        flag_percent = (stats['flagged_samples'] / stats['total_samples'] * 100 
-                                       if stats['total_samples'] > 0 else 100)
-                        
-                        if flag_percent > 90:
-                            continue
-                        
-                        med_amp = np.median(stats['valid_amplitudes'])
-                        if med_amp < threshold:
-                            scan_bad_ants.append({
-                                'name': ant_names[ant],
-                                'median_amplitude': float(med_amp),
-                                'ratio_to_reference': float(med_amp / reference_amp),
-                                'flag_percentage': float(flag_percent)
-                            })
-                
+                    if ant in mock_set:
+                        continue
+
+                    key = s * num_ants + ant
+                    med_amp = scan_ant_medians[key]
+
+                    # No unflagged data for this antenna/scan at all
+                    if not np.isfinite(med_amp):
+                        continue
+
+                    # Effectively already flagged - leave it to the flagger
+                    if flag_percent[key] > 90:
+                        continue
+
+                    if med_amp < threshold:
+                        scan_bad_ants.append({
+                            'name': ant_names[ant],
+                            'median_amplitude': float(med_amp),
+                            'ratio_to_reference': float(med_amp / reference_amp),
+                            'flag_percentage': float(flag_percent[key])
+                        })
+
                 if scan_bad_ants:
                     scan_bad_antennas[int(scan)] = scan_bad_ants
-            
+
             return {
                 'field': int(field),
                 'spw': int(spw),
                 'mock_antennas': [ant_names[i] for i in mock_ants],
                 'scan_bad_antennas': scan_bad_antennas,
-                'reference_amplitude': float(reference_amp)
+                'reference_amplitude': reference_amp
             }
-            
+
     except Exception as e:
         print(f"Error processing Field {field}, SPW {spw}: {str(e)}")
         return None
@@ -205,7 +248,20 @@ def process_spw_field(params):
         remove_table_lock(ms_path)
 
 
-def find_dead_antennas(ms_path: str, output_file: str, n_processes: int = None, 
+def write_user_and_standard_flags(f, user_bad_ants: List[str] = None):
+    """Append user-specified bad antennas and the standard flag commands."""
+    if user_bad_ants:
+        for ant in user_bad_ants:
+            f.write(f"mode='manual' antenna='{ant}' reason='user_specified'\n")
+
+    f.write("# Standard flags\n")
+    f.write("mode='manual' autocorr=True reason='autocorr'\n")
+    f.write("mode='clip' correlation='ABS_ALL' clipzeros=True reason='clip_zeros'\n")
+    f.write("mode='quack' quackinterval=10 quackmode='beg' quackincrement=False reason='quackbeg'\n")
+    f.write("mode='quack' quackinterval=10 quackmode='endb' quackincrement=False reason='quackend'\n")
+
+
+def find_dead_antennas(ms_path: str, output_file: str, n_processes: int = None,
                        user_bad_ants: List[str] = None):
     """
     Find dead/bad antennas in MS and write to badants.txt.
@@ -253,18 +309,8 @@ def find_dead_antennas(ms_path: str, output_file: str, n_processes: int = None,
                     scan_list = sorted(list(scan_set))
                     scan_str = ','.join(map(str, scan_list))
                     f.write(f"mode='manual' antenna='{ant_name}' field='{field}' scan='{scan_str}' reason='dead_antenna'\n")
-        
-        # User bad antennas
-        if user_bad_ants:
-            for ant in user_bad_ants:
-                f.write(f"mode='manual' antenna='{ant}' reason='user_specified'\n")
-        
-        # Standard flags
-        f.write("# Standard flags\n")
-        f.write("mode='manual' autocorr=True reason='autocorr'\n")
-        f.write("mode='clip' correlation='ABS_ALL' clipzeros=True reason='clip_zeros'\n")
-        f.write("mode='quack' quackinterval=10 quackmode='beg' quackincrement=False reason='quackbeg'\n")
-        f.write("mode='quack' quackinterval=10 quackmode='endb' quackincrement=False reason='quackend'\n")
+
+        write_user_and_standard_flags(f, user_bad_ants)
     
     print(f"Bad antenna results written to: {output_file}")
     
@@ -301,75 +347,73 @@ def find_best_refant(ms_path: str, n_processes: int = None) -> Tuple[str, Dict]:
         with tables.table(ms_path, ack=False) as tb:
             # Sample subset for speed
             nrows = min(tb.nrows(), 100000)
+            if nrows == 0:
+                print("WARNING: MS has no rows, cannot determine refant")
+                return ant_names[0] if ant_names else None, {}
             ant1 = tb.getcol('ANTENNA1', 0, nrows)
             ant2 = tb.getcol('ANTENNA2', 0, nrows)
-            data = tb.getcol('DATA', 0, nrows)
-            flags = tb.getcol('FLAG', 0, nrows)
-        
-        npols = data.shape[-1]
-        
-        # Collect antenna statistics
-        ant_stats = defaultdict(lambda: {
-            'valid_amplitudes': [],
-            'total_samples': 0,
-            'flagged_samples': 0
-        })
-        
-        for i in range(len(data)):
-            a1, a2 = ant1[i], ant2[i]
-            
-            if npols == 4:
-                pol_flags = flags[i, :, 0] | flags[i, :, 3]
-                valid_mask = ~pol_flags
-                if np.any(valid_mask):
-                    amp = (np.abs(data[i, valid_mask, 0]) + np.abs(data[i, valid_mask, 3])) / 2
-                else:
-                    amp = np.array([])
-            elif npols == 2:
-                pol_flags = flags[i, :, 0] | flags[i, :, 1]
-                valid_mask = ~pol_flags
-                if np.any(valid_mask):
-                    amp = (np.abs(data[i, valid_mask, 0]) + np.abs(data[i, valid_mask, 1])) / 2
-                else:
-                    amp = np.array([])
-            else:
-                valid_mask = ~flags[i, :, 0]
-                if np.any(valid_mask):
-                    amp = np.abs(data[i, valid_mask, 0])
-                else:
-                    amp = np.array([])
-            
-            for ant in [a1, a2]:
-                ant_stats[ant]['total_samples'] += len(valid_mask)
-                ant_stats[ant]['flagged_samples'] += np.sum(~valid_mask)
-                if len(amp) > 0:
-                    ant_stats[ant]['valid_amplitudes'].extend(amp.tolist())
-        
+            npols = int(tb.getcell('DATA', 0).shape[-1])
+
+            # Channel-averaged per row, read in chunks - see _read_row_amplitudes
+            row_amp, n_valid, n_total = _read_row_amplitudes(tb, npols,
+                                                             max_rows=nrows)
+
+        num_ants = len(ant_names)
+
+        # Every row contributes to both of its antennas
+        ants = np.concatenate([ant1, ant2])
+        amps = np.tile(row_amp, 2)
+        valid = np.tile(n_valid, 2)
+        total = np.tile(n_total, 2)
+
+        finite = np.isfinite(amps)
+        # Unflagged (row, channel) samples per antenna - the quantity the
+        # minimum-data guard below has always been expressed in.
+        counts = np.bincount(ants, weights=valid, minlength=num_ants)
+        flagged = np.bincount(ants, weights=(total - valid), minlength=num_ants)
+        sampled = np.bincount(ants, weights=total, minlength=num_ants)
+
+        medians = _grouped_medians(ants, amps, num_ants)
+
+        # Scatter about the median, per antenna
+        stds = np.full(num_ants, np.nan)
+        order = np.argsort(ants[finite], kind='stable')
+        sorted_ants = ants[finite][order]
+        sorted_amps = amps[finite][order]
+        boundaries = np.flatnonzero(np.diff(sorted_ants)) + 1
+        for gk, gv in zip(np.split(sorted_ants, boundaries),
+                          np.split(sorted_amps, boundaries)):
+            if gv.size:
+                stds[gk[0]] = np.std(gv)
+
         # Calculate SNR metric for each antenna
         refant_scores = {}
-        for ant_idx, stats in ant_stats.items():
-            if len(stats['valid_amplitudes']) < 100:
+        for ant_idx in range(num_ants):
+            # Same guard as before: too little surviving data to judge
+            if counts[ant_idx] < 100:
                 continue
-            
-            amps = np.array(stats['valid_amplitudes'])
-            median_amp = np.median(amps)
-            std_amp = np.std(amps)
-            
+
+            median_amp = medians[ant_idx]
+            std_amp = stds[ant_idx]
+
+            if not np.isfinite(median_amp) or not np.isfinite(std_amp):
+                continue
             if std_amp == 0 or median_amp == 0:
                 continue
-            
-            flag_fraction = stats['flagged_samples'] / stats['total_samples'] if stats['total_samples'] > 0 else 1.0
-            
+
+            flag_fraction = (flagged[ant_idx] / sampled[ant_idx]
+                             if sampled[ant_idx] > 0 else 1.0)
+
             # SNR metric: (median/std) * (1 - flag_fraction)
             snr_metric = (median_amp / std_amp) * (1 - flag_fraction)
-            
+
             refant_scores[ant_names[ant_idx]] = {
                 'snr_metric': float(snr_metric),
                 'median_amp': float(median_amp),
                 'std_amp': float(std_amp),
                 'flag_fraction': float(flag_fraction)
             }
-        
+
         if not refant_scores:
             print("WARNING: Could not determine best refant, using first antenna")
             return ant_names[0], {}
@@ -410,7 +454,16 @@ def run_bad_antenna_detection(hk, config, active_spws: List[str], logger,
     user_bad_ants = bad_ant_config.get('list', [])
     if isinstance(user_bad_ants, str):
         user_bad_ants = [a.strip() for a in user_bad_ants.split(',') if a.strip()]
-    
+
+    # auto=false: skip detection, just write the user list + standard flags
+    if not bad_ant_config.get('auto', True):
+        logger.info("bad_antennas.auto=false - skipping detection, "
+                    "writing user list + standard flags only")
+        for spw in active_spws:
+            with open(f"{spw}/badants.txt", 'w') as f:
+                write_user_and_standard_flags(f, user_bad_ants)
+        return active_spws
+
     preamble = env.get('shell_preamble', '')
     resources = config.resources.get('default', {})
     ppn = resources.get('ppn', 4)
@@ -446,8 +499,7 @@ python3 {script_file}
             command=command,
             name=f"badant_{spw}",
             job_subdir=spw,
-            ppn=ppn,
-            walltime=resources.get('walltime', '02:00:00')
+            **submit_resources(resources, '02:00:00', ppn=ppn)
         )
 
         if job.job_id:
@@ -536,8 +588,7 @@ python3 {script_file}
             command=command,
             name=f"refant_{spw}",
             job_subdir=spw,
-            ppn=ppn,
-            walltime="01:00:00"
+            **submit_resources(resources, walltime='01:00:00', ppn=ppn)
         )
 
         if job.job_id:

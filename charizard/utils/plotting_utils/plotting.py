@@ -9,6 +9,7 @@ import time
 from typing import Optional, List, Dict
 
 from housekeeper import Housekeeper
+from ..general.resources import submit_resources
 from ..container import build_udocker_prefix
 
 
@@ -95,7 +96,9 @@ echo "Plotting {cal}..."
     
     # Cross-hand plots for polcal
     if do_polcal:
-        pol_cals = list(set([c for c in [cal_plan.get('polangle_cal'), 
+        # Cross-hand correlation names depend on feed basis
+        crosshand_corr = 'XY,YX' if cal_plan.get('pol_basis') == 'linear' else 'RL,LR'
+        pol_cals = list(set([c for c in [cal_plan.get('polangle_cal'),
                                           cal_plan.get('leakage_cal')] if c]))
         if pol_cals:
             script += """
@@ -106,15 +109,15 @@ echo "Plotting cross-hand correlations..."
             for cal in pol_cals:
                 script += f"""
 # {cal} Cross-hand
-{shadems_cmd(ms_path, "FREQ", "CORRECTED_DATA:amp", field=cal, corr="RL,LR",
+{shadems_cmd(ms_path, "FREQ", "CORRECTED_DATA:amp", field=cal, corr=crosshand_corr,
              colour_by="SCAN_NUMBER", out_dir=out_dir, suffix=f"_{cal}_freq_crossamp",
              title=f"{cal} Freq vs Cross-Amp")}
 
-{shadems_cmd(ms_path, "FREQ", "CORRECTED_DATA:phase", field=cal, corr="RL,LR",
+{shadems_cmd(ms_path, "FREQ", "CORRECTED_DATA:phase", field=cal, corr=crosshand_corr,
              colour_by="SCAN_NUMBER", out_dir=out_dir, suffix=f"_{cal}_freq_crossphase",
              title=f"{cal} Freq vs Cross-Phase")}
 
-{shadems_cmd(ms_path, "TIME", "CORRECTED_DATA:amp", field=cal, corr="RL,LR",
+{shadems_cmd(ms_path, "TIME", "CORRECTED_DATA:amp", field=cal, corr=crosshand_corr,
              colour_by="ANTENNA1", out_dir=out_dir, suffix=f"_{cal}_time_crossamp",
              title=f"{cal} Time vs Cross-Amp")}
 
@@ -179,7 +182,8 @@ def run_diagnostic_plots(hk: Housekeeper,
         plot_targets: Whether to also plot targets
     
     Returns:
-        True if plotting completed (even with some failures)
+        True if at least one plotting job succeeded (partial failures are
+        logged as warnings); False if every job failed
     """
     logger.substep("Generating diagnostic plots with shadems...")
     
@@ -209,8 +213,7 @@ def run_diagnostic_plots(hk: Housekeeper,
             command=command,
             name=f"plot_cal_{spw}",
             job_subdir=spw,
-            ppn=ppn,
-            walltime=resources.get('walltime', '01:00:00')
+            **submit_resources(resources, '01:00:00', ppn=ppn)
         )
         
         if job.job_id:
@@ -236,8 +239,7 @@ def run_diagnostic_plots(hk: Housekeeper,
                 command=command,
                 name=f"plot_src_{spw}",
                 job_subdir=spw,
-                ppn=ppn,
-                walltime=resources.get('walltime', '01:00:00')
+                **submit_resources(resources, '01:00:00', ppn=ppn)
             )
             
             if job.job_id:
@@ -264,6 +266,10 @@ def run_diagnostic_plots(hk: Housekeeper,
             logger.info(f"{spw} ({plot_type}): OK")
         else:
             logger.warning(f"{spw} ({plot_type}): plotting had issues")
-    
+
+    if success_count == 0:
+        logger.error("ALL plotting jobs failed")
+        return False
+
     logger.info(f"Plots saved to {{spw}}/plots/ directories")
     return True

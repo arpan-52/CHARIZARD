@@ -10,6 +10,7 @@ import time
 from typing import List, Optional, Dict
 
 from housekeeper import Housekeeper
+from ..general.resources import submit_resources
 
 from ..container import build_udocker_prefix
 
@@ -171,9 +172,8 @@ def run_catboss(hk: Housekeeper,
             command=command,
             name=job_name,
             job_subdir=spw,
-            ppn=ppn,
-            walltime=resources.get('walltime', '08:00:00'),
-            gpu=use_gpu
+            gpu=use_gpu,
+            **submit_resources(resources, '08:00:00', ppn=ppn)
         )
         
         if job.job_id:

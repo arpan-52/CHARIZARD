@@ -8,6 +8,7 @@ import time
 from typing import List, Optional, Dict
 
 from housekeeper import Housekeeper
+from ..general.resources import submit_resources
 from ..container import build_udocker_prefix
 
 
@@ -40,7 +41,6 @@ def run_initial_flagging(hk: Housekeeper,
     logger.substep(f"Applying {flag_file} to {ms_names}...")
     
     env = config.environment
-    casa_path = env.get('casa_path', '')
     preamble = env.get('shell_preamble', '')
     resources = config.resources.get('flagging', config.resources.get('default', {}))
     ppn = resources.get('ppn', 4)
@@ -87,8 +87,7 @@ print("Applied {flag_file} to {ms_path}")
             command=command,
             name=job_name,
             job_subdir=spw,
-            ppn=ppn,
-            walltime=resources.get('walltime', '04:00:00')
+            **submit_resources(resources, '04:00:00', ppn=ppn)
         )
         
         if job.job_id:

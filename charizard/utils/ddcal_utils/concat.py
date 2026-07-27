@@ -10,6 +10,7 @@ import time
 from typing import List, Dict, Optional
 
 from housekeeper import Housekeeper
+from ..general.resources import submit_resources
 from ..container import build_udocker_prefix
 
 
@@ -36,7 +37,6 @@ def concat_ms(hk: Housekeeper,
     logger.substep("Concatenating MS files for DDCal...")
     
     env = config.environment
-    casa_path = env.get('casa_path', '')
     preamble = env.get('shell_preamble', '')
     resources = config.resources.get('ddcal', config.resources.get('default', {}))
     ppn = resources.get('ppn', 4)
@@ -91,8 +91,7 @@ print(f"Combined MS: {{output_ms}}")
             command=command,
             name=f"concat_{field}",
             job_subdir=field_dir,
-            ppn=ppn,
-            walltime=resources.get('walltime', '02:00:00')
+            **submit_resources(resources, '02:00:00', ppn=ppn)
         )
         
         if job.job_id:

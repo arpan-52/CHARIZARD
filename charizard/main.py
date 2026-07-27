@@ -6,6 +6,7 @@ Entry point - parse args, define whitelist, call charizard()
 """
 
 import argparse
+import os
 import sys
 
 from .charizard import charizard
@@ -205,6 +206,12 @@ def main():
 
     # charizard run pokedex.yaml
     config = parse_config(args.config, models_path=args.models)
+
+    # All job scripts and outputs are created relative to CWD, and the
+    # container only mounts working_dir - so run from there regardless of
+    # where the user launched charizard.
+    os.makedirs(config.working_dir, exist_ok=True)
+    os.chdir(config.working_dir)
 
     logger = PipelineLogger(config.working_dir)
     logger.banner("CHARIZARD PIPELINE")

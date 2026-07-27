@@ -10,6 +10,7 @@ Logic:
 5. targets = everything else
 """
 
+import math
 import os
 import re
 import yaml
@@ -24,8 +25,48 @@ import astropy.units as u
 # Known CASA flux calibrators
 AMP_CAL_STANDARD_NAMES = [
     "3C147", "3C138", "3C48", "3C84", "3C295", "3C286",
-    "3C196", "3C123", "J1331+3030", "J0521+1638"
+    "3C196", "3C123", "J1331+3030", "J0521+1638",
+    # MeerKAT primaries - southern, absent from the VLA catalog
+    "J1939-6342", "1934-638", "1939-637", "PKSB1934-638", "PKS B1934-638",
+    "J0408-6545", "0408-65", "0408-655", "PKSB0407-65", "PKS B0407-65",
 ]
+
+# Sections of internal_models.yaml whose entries carry a `names:` alias list
+_ALIASED_SECTIONS = ('known_unpolarized', 'known_polarized', 'polcal_models',
+                     'manual_flux_models')
+
+
+def _normalize(name: str) -> str:
+    """Loose form of a source name for alias matching: case/space/underscore free."""
+    return str(name).upper().replace(' ', '').replace('_', '')
+
+
+def log_poly_to_setjy(log_poly: List[float], reffreq_hz: float = 1.0e9):
+    """Convert a SARAO log-log flux model into setjy's manual form.
+
+    SARAO publishes MeerKAT calibrators as
+        log10(S) = a + b*Lm + c*Lm^2 + d*Lm^3,      Lm = log10(nu / 1 MHz)
+    while setjy wants
+        S = fluxdensity * (nu/nu0)^(spix0 + spix1*L + spix2*L^2),  L = log10(nu/nu0)
+
+    Both are cubics in log10(nu), so this is an exact reparametrisation rather
+    than a fit. Substituting Lm = L + m with m = log10(nu0 / 1 MHz) and matching
+    powers of L gives the coefficients below. (SARAO's published snippet does the
+    same thing numerically with scipy curve_fit; this reproduces its output to
+    six significant figures without the dependency or the failure modes.)
+
+    Returns:
+        (reffreq_hz, fluxdensity_jy, spix0, spix1, spix2)
+    """
+    a, b, c, d = (list(log_poly) + [0.0, 0.0, 0.0, 0.0])[:4]
+    m = math.log10(reffreq_hz / 1.0e6)
+
+    spix0 = b + 2 * c * m + 3 * d * m ** 2
+    spix1 = c + 3 * d * m
+    spix2 = d
+    fluxdensity = 10 ** (a + b * m + c * m ** 2 + d * m ** 3)
+
+    return reffreq_hz, fluxdensity, spix0, spix1, spix2
 
 
 class CalibratorMatcher:
@@ -140,7 +181,70 @@ class CalibratorMatcher:
     
     def is_amp_cal(self, source_name: str) -> bool:
         """Check if source is a standard amplitude calibrator"""
-        return any(source_name.upper() == amp.upper() for amp in AMP_CAL_STANDARD_NAMES)
+        target = _normalize(source_name)
+        return any(target == _normalize(amp) for amp in AMP_CAL_STANDARD_NAMES)
+
+    def resolve_name(self, source_name: str) -> str:
+        """Map an MS field name onto its canonical model key.
+
+        MeerKAT fields turn up as 'J1939-6342', '1934-638' or 'PKS B1934-638'
+        depending on how the MS was written, so a plain dict lookup misses.
+        Falls back to the name as given when nothing matches.
+        """
+        target = _normalize(source_name)
+
+        for models in (self.user_models, self.internal_models):
+            if not models:
+                continue
+            for section in _ALIASED_SECTIONS:
+                entries = models.get(section, {}) or {}
+                if not isinstance(entries, dict):
+                    continue
+                for key, entry in entries.items():
+                    if target == _normalize(key):
+                        return key
+                    aliases = (entry or {}).get('names', []) if isinstance(entry, dict) else []
+                    if any(target == _normalize(a) for a in aliases):
+                        return key
+
+        return source_name
+
+    def get_flux_standard(self, source_name: str) -> Optional[str]:
+        """setjy `standard` for this calibrator, or None to use CASA's default.
+
+        Returns 'manual' for sources that have no CASA standard at all - the
+        caller must then fetch coefficients via get_manual_flux_model().
+        """
+        canonical = self.resolve_name(source_name)
+
+        for models in (self.user_models, self.internal_models):
+            if not models:
+                continue
+            standards = models.get('flux_standards', {}) or {}
+            for key in (source_name, canonical):
+                if key in standards:
+                    return standards[key]
+            target = _normalize(source_name)
+            for key, std in standards.items():
+                if target == _normalize(key):
+                    return std
+
+        return None
+
+    def get_manual_flux_model(self, source_name: str) -> Optional[Dict]:
+        """Log-polynomial flux model for sources with no CASA standard."""
+        canonical = self.resolve_name(source_name)
+
+        for models in (self.user_models, self.internal_models):
+            if not models:
+                continue
+            manual = models.get('manual_flux_models', {}) or {}
+            if canonical in manual:
+                return manual[canonical]
+            if source_name in manual:
+                return manual[source_name]
+
+        return None
     
     def match_source_to_calibrator(self, source_coord, source_name: str, threshold_arcsec: float = 60.0):
         """Match source to calibrator by position"""
@@ -202,60 +306,59 @@ class CalibratorMatcher:
         1. User models (override): full_stokes.<name>, polcal_models.<name>, <name>
         2. Internal models: polcal_models.<name>
         """
+        canonical = self.resolve_name(source_name)
+
         # Check user models first (they override internal)
         if self.user_models:
             # Try full_stokes first
-            full_stokes = self.user_models.get('full_stokes', {})
-            if source_name in full_stokes:
-                return full_stokes[source_name]
-            
+            full_stokes = self.user_models.get('full_stokes', {}) or {}
+            for key in (source_name, canonical):
+                if key in full_stokes:
+                    return full_stokes[key]
+
             # Try polcal_models
-            polcal_models = self.user_models.get('polcal_models', {})
-            if source_name in polcal_models:
-                return polcal_models[source_name]
-            
+            polcal_models = self.user_models.get('polcal_models', {}) or {}
+            for key in (source_name, canonical):
+                if key in polcal_models:
+                    return polcal_models[key]
+
             # Try direct
             if source_name in self.user_models:
                 return self.user_models[source_name]
-        
+
         # Fall back to internal models
         if self.internal_models:
-            polcal_models = self.internal_models.get('polcal_models', {})
-            if source_name in polcal_models:
-                return polcal_models[source_name]
-        
+            polcal_models = self.internal_models.get('polcal_models', {}) or {}
+            for key in (source_name, canonical):
+                if key in polcal_models:
+                    return polcal_models[key]
+
         return None
     
     def is_known_unpolarized(self, source_name: str) -> bool:
         """Check if source is in known_unpolarized list."""
-        # Check user models first
-        if self.user_models:
-            known_unpol = self.user_models.get('known_unpolarized', {})
-            if source_name in known_unpol:
+        canonical = self.resolve_name(source_name)
+
+        for models in (self.user_models, self.internal_models):
+            if not models:
+                continue
+            known_unpol = models.get('known_unpolarized', {}) or {}
+            if source_name in known_unpol or canonical in known_unpol:
                 return True
-        
-        # Check internal models
-        if self.internal_models:
-            known_unpol = self.internal_models.get('known_unpolarized', {})
-            if source_name in known_unpol:
-                return True
-        
+
         return False
-    
+
     def is_known_polarized(self, source_name: str) -> bool:
         """Check if source is in known_polarized list."""
-        # Check user models first
-        if self.user_models:
-            known_pol = self.user_models.get('known_polarized', {})
-            if source_name in known_pol:
+        canonical = self.resolve_name(source_name)
+
+        for models in (self.user_models, self.internal_models):
+            if not models:
+                continue
+            known_pol = models.get('known_polarized', {}) or {}
+            if source_name in known_pol or canonical in known_pol:
                 return True
-        
-        # Check internal models
-        if self.internal_models:
-            known_pol = self.internal_models.get('known_polarized', {})
-            if source_name in known_pol:
-                return True
-        
+
         return False
     
     def has_full_stokes_model(self, source_name: str) -> bool:
@@ -268,8 +371,8 @@ class CalibratorMatcher:
         """
         # Check user models for full_stokes dict first
         if self.user_models:
-            full_stokes = self.user_models.get('full_stokes', {})
-            if source_name in full_stokes:
+            full_stokes = self.user_models.get('full_stokes', {}) or {}
+            if source_name in full_stokes or self.resolve_name(source_name) in full_stokes:
                 return True
 
         # Check polcal_models for full Stokes info
@@ -324,6 +427,8 @@ def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
         'gain_calibrators': [],  # For linear feeds: cals to use in gain cal
         'calibrator_uvranges': {},
         'polcal_models': {},
+        'flux_standards': {},       # field -> setjy standard (or 'manual')
+        'manual_flux_models': {},   # field -> log-polynomial coefficients
         'pol_basis': ms_info.get('pol_basis', 'circular'),
         'polangle_has_full_stokes_model': False,
     }
@@ -331,6 +436,12 @@ def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
     overrides = config.calibrator_overrides
     uvrange_overrides = config.uvrange_overrides
     user_models = config.user_models
+
+    # Minimum baselines per antenna for a solution to be kept. MeerKAT/IDIA
+    # convention is 4; overridable from the config.
+    _cal_cfg = (config.flow.get('initial_calibration_flagging', {})
+                .get('calibration', {}))
+    cal_plan['minblperant'] = int(_cal_cfg.get('minblperant', 4))
     
     matcher = CalibratorMatcher(user_models=user_models, logger=logger)
     wavelength_cm = ms_info.get('wavelength_cm', 20.0)
@@ -343,8 +454,16 @@ def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
     phase_cals = []
     targets = []
     calibrator_details = {}
-    
-    for fid, fdata in ms_info['fields'].items():
+
+    auto_detect = getattr(config, 'auto_detect', True)
+    if not auto_detect:
+        logger.info("auto_detect=false - skipping calibrator detection, using overrides only")
+        targets = list(ms_field_names)
+        fields_to_classify = {}
+    else:
+        fields_to_classify = ms_info['fields']
+
+    for fid, fdata in fields_to_classify.items():
         field_name = fdata['name']
         coord = SkyCoord(ra=fdata['ra_rad'] * u.radian, dec=fdata['dec_rad'] * u.radian)
         
@@ -379,23 +498,45 @@ def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
     # =========================================================================
     # APPLY USER OVERRIDES
     # =========================================================================
+    def _keep_present(names, label):
+        """Drop override names that aren't actually fields in the MS.
+
+        Silently trusting these is how a typo turns into a split on a
+        non-existent field, so warn loudly and drop instead.
+
+        Only plain names are checked. CASA field selection also accepts field
+        IDs and wildcards, which we cannot resolve here, so those pass through
+        untouched rather than being wrongly discarded.
+        """
+        if isinstance(names, str):
+            names = [n.strip() for n in names.split(',') if n.strip()]
+
+        present, missing = [], []
+        for n in names:
+            literal = not ('*' in n or '?' in n or n.isdigit() or '~' in n)
+            if n in ms_field_names or not literal:
+                present.append(n)
+            else:
+                missing.append(n)
+
+        if missing:
+            logger.warning(f"{label} override not in MS, ignoring: {missing}")
+            logger.warning(f"  MS fields are: {ms_field_names}")
+        return present
+
     if overrides:
         amp_override = overrides.get('amp')
         if amp_override:
-            if isinstance(amp_override, list):
-                cal_plan['flux_cal'] = ",".join(amp_override)
-            else:
-                cal_plan['flux_cal'] = amp_override
+            kept = _keep_present(amp_override, "Flux cal")
+            cal_plan['flux_cal'] = ",".join(kept) if kept else None
             logger.info(f"User override flux cal: {cal_plan['flux_cal']}")
-        
+
         phase_override = overrides.get('phase')
         if phase_override:
-            if isinstance(phase_override, list):
-                cal_plan['phase_cal'] = ",".join(phase_override)
-            else:
-                cal_plan['phase_cal'] = phase_override
+            kept = _keep_present(phase_override, "Phase cal")
+            cal_plan['phase_cal'] = ",".join(kept) if kept else None
             logger.info(f"User override phase cal: {cal_plan['phase_cal']}")
-        
+
         leakage_override = overrides.get('leakage')
         if leakage_override:
             if isinstance(leakage_override, list):
@@ -471,6 +612,40 @@ def build_calibration_plan(ms_info: Dict, config, logger) -> Dict[str, Any]:
         if model:
             cal_plan['polcal_models'][cal] = model
             logger.info(f"Polcal model found for {cal}")
+
+    # =========================================================================
+    # FLUX STANDARDS
+    # Which setjy standard each amplitude calibrator needs. Left unset means
+    # CASA's default (Perley-Butler 2017), which has no southern sources.
+    # =========================================================================
+    for cal in [c.strip() for c in (cal_plan['flux_cal'] or '').split(',') if c.strip()]:
+        standard = matcher.get_flux_standard(cal)
+        if not standard:
+            logger.info(f"Flux standard for {cal}: CASA default (Perley-Butler 2017)")
+            continue
+
+        cal_plan['flux_standards'][cal] = standard
+
+        if standard == 'manual':
+            manual = matcher.get_manual_flux_model(cal)
+            if manual and manual.get('log_poly'):
+                reffreq = float(ms_info.get('central_freq_hz') or 1.0e9)
+                ref, flux, s0, s1, s2 = log_poly_to_setjy(manual['log_poly'], reffreq)
+                cal_plan['manual_flux_models'][cal] = {
+                    'reffreq_hz': ref,
+                    'fluxdensity': flux,
+                    'spix': [s0, s1, s2],
+                    'log_poly': manual['log_poly'],
+                }
+                logger.info(f"Flux standard for {cal}: manual model, "
+                            f"S({ref/1e9:.3f} GHz) = {flux:.3f} Jy, "
+                            f"spix = [{s0:.4f}, {s1:.4f}, {s2:.4f}]")
+            else:
+                logger.error(f"{cal} needs standard='manual' but has no log_poly "
+                             f"coefficients - setjy would set NO model!")
+                logger.error(f"  Add {cal} to manual_flux_models in your models file.")
+        else:
+            logger.info(f"Flux standard for {cal}: {standard}")
 
     # =========================================================================
     # CHECK IF POLANGLE CAL HAS FULL STOKES MODEL

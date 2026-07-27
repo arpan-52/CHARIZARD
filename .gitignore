@@ -113,4 +113,10 @@ CLAUDE.md
 .claude/
 .aider*
 
+# =========================
+# Paper drafts
+# =========================
+paper/
+paper_aas/
+
 

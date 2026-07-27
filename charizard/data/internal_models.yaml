@@ -8,9 +8,52 @@ casa_flux_cals:
   - 3C48
   - 3C147
   - 3C138
+  - J1939-6342
+  - J0408-6545
+
+# Which setjy standard to use per flux calibrator.
+# Anything not listed here falls through to CASA's default (Perley-Butler 2017),
+# which only covers the northern 3C sources.
+#   Stevens-Reynolds 2016 - the only CASA standard containing 1934-638
+#   manual                - no CASA standard exists; see manual_flux_models below
+flux_standards:
+  J1939-6342: "Stevens-Reynolds 2016"
+  "1934-638": "Stevens-Reynolds 2016"
+  "1939-637": "Stevens-Reynolds 2016"
+  PKSB1934-638: "Stevens-Reynolds 2016"
+  J0408-6545: manual
+  "0408-65": manual
+  "0408-655": manual
+  PKSB0407-65: manual
+
+# Sources with no CASA flux standard at all. Coefficients are for the
+# log-log model used by SARAO:
+#     log10(S) = a + b*log10(nu/MHz) + c*log10(nu/MHz)^2 + d*log10(nu/MHz)^3
+# CHARIZARD refits this to setjy's
+#     S = fluxdensity * (nu/reffreq)^(spix0 + spix1*L + spix2*L^2),  L=log10(nu/reffreq)
+# over each SPW's own frequency range at solve time (see gains.py).
+manual_flux_models:
+  J0408-6545:
+    ra: "04h08m20.4s"
+    dec: "-65d45m09s"
+    names: ["J0408-6545", "0408-65", "0408-655", "PKSB0407-65", "PKS B0407-65"]
+    log_poly: [-0.9790, 3.3662, -1.1216, 0.0861]   # a, b, c, d  (Partridge et al. 2016)
+    notes: "MeerKAT primary. No CASA standard; refit to a manual setjy model."
 
 # Known unpolarized sources (good for leakage calibration)
 known_unpolarized:
+  J1939-6342:
+    ra: "19h39m25.026s"
+    dec: "-63d42m45.63s"
+    names: ["J1939-6342", "1934-638", "1939-637", "PKSB1934-638", "PKS B1934-638"]
+    notes: "MeerKAT primary flux/bandpass cal. <0.2% polarized, very stable."
+
+  J0408-6545:
+    ra: "04h08m20.4s"
+    dec: "-65d45m09s"
+    names: ["J0408-6545", "0408-65", "0408-655", "PKSB0407-65"]
+    notes: "MeerKAT primary flux/bandpass cal. Low polarization."
+
   3C84:
     ra: "03h19m48.16s"
     dec: "+41d30m42.1s"
@@ -45,6 +88,8 @@ known_polarized:
 
 # Full Stokes polarization models for polcal
 # Required for polarization angle calibration
+# NOTE: polarization_angle is in RADIANS (setjy convention) and is passed
+# to setjy / the XYf+QU helper as-is, with no unit conversion.
 polcal_models:
   3C286:
     ra: "13h31m08.29s"
@@ -54,7 +99,7 @@ polcal_models:
     spectral_index: [-0.465, -0.18]
     reffreq: "1.4GHz"
     polarization_fraction: [0.095]
-    polarization_angle: [33.0]  # degrees
+    polarization_angle: [0.5759587]  # radians (33 deg)
     notes: "Standard pol angle calibrator, stable"
   
   3C138:
@@ -65,7 +110,7 @@ polcal_models:
     spectral_index: [-0.5]
     reffreq: "1.4GHz"
     polarization_fraction: [0.075]
-    polarization_angle: [-10.0]  # degrees
+    polarization_angle: [-0.1745329]  # radians (-10 deg)
     notes: "VARIABLE - use 3C286 if possible"
 
   3C48:
@@ -76,5 +121,5 @@ polcal_models:
     spectral_index: [-0.8]
     reffreq: "1.4GHz"
     polarization_fraction: [0.005]
-    polarization_angle: [25.0]
+    polarization_angle: [0.4363323]  # radians (25 deg)
     notes: "Low polarization, flux calibrator"

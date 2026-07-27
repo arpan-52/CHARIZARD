@@ -10,6 +10,7 @@ import time
 from typing import List, Optional, Dict
 
 from housekeeper import Housekeeper
+from ..general.resources import submit_resources
 
 from ..container import build_udocker_prefix
 
@@ -143,8 +144,7 @@ def run_nimki(hk: Housekeeper,
             command=command,
             name=job_name,
             job_subdir=spw,
-            ppn=ppn,
-            walltime=resources.get('walltime', '04:00:00')
+            **submit_resources(resources, '04:00:00', ppn=ppn)
         )
 
         if job.job_id:

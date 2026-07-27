@@ -17,6 +17,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from housekeeper import Housekeeper
+from ..general.resources import submit_resources
 from ..container import build_udocker_prefix
 
 from ..general.tracker import JobTracker
@@ -286,8 +287,7 @@ def run_split(hk: Housekeeper,
             command=command,
             name=f"split_{spw}",
             job_subdir=".",
-            ppn=resources.get('ppn', 4),
-            walltime=resources.get('walltime', '04:00:00')
+            **submit_resources(resources, '04:00:00')
         )
 
         if job.job_id:

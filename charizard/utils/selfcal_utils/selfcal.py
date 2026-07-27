@@ -17,6 +17,7 @@ import yaml
 from typing import List, Dict, Optional
 
 from housekeeper import Housekeeper
+from ..general.resources import submit_resources
 from ..container import build_udocker_prefix
 
 # Import existing flagging functions
@@ -198,6 +199,36 @@ def run_selfcal_flagging(hk: Housekeeper,
     return new_ms_map if new_ms_map else None
 
 
+def check_imaging_results(ms_map: Dict[str, List[str]],
+                          image_map: Optional[Dict],
+                          brotherhood: bool,
+                          logger) -> Optional[Dict[str, List[str]]]:
+    """
+    Drop fields whose imaging round failed.
+
+    The per-round MS has no MODEL_DATA until wsclean writes one, so a failed
+    imaging round would make the following gaincal silently solve against a
+    default 1 Jy point-source model.
+
+    Returns:
+        Filtered ms_map, or None if all fields failed (or brotherhood=True
+        and any field failed).
+    """
+    if not image_map:
+        logger.error("Imaging failed for ALL fields!")
+        return None
+
+    failed = [f for f in ms_map if f not in image_map]
+    if failed:
+        if brotherhood:
+            logger.error(f"Brotherhood=True, imaging failed for: {failed}, stopping!")
+            return None
+        logger.warning(f"Imaging failed for {failed}, dropping those fields")
+
+    new_ms_map = {f: ms_list for f, ms_list in ms_map.items() if f in image_map}
+    return new_ms_map if new_ms_map else None
+
+
 def run_gaincal_bandpass(hk: Housekeeper,
                          config,
                          ms_map: Dict[str, List[str]],
@@ -227,7 +258,6 @@ def run_gaincal_bandpass(hk: Housekeeper,
     logger.substep(f"Running gaincal+bandpass ({mode_name}, solint={solint}, gaintype={gaintype})...")
     
     env = config.environment
-    casa_path = env.get('casa_path', '')
     preamble = env.get('shell_preamble', '')
     resources = config.resources.get('selfcal', config.resources.get('default', {}))
     ppn = resources.get('ppn', 4)
@@ -285,6 +315,10 @@ if not os.path.exists('{caltable_g}'):
     raise RuntimeError("Gaincal failed - no caltable!")
 
 # Bandpass
+# solnorm follows the round type: normalised during phase-only rounds so the
+# B table cannot carry an absolute amplitude scale (an un-normalised bandpass
+# is amplitude selfcal in disguise, and eats real source flux from round 1),
+# free during amp+phase rounds where solving amplitude is the point.
 print("Running bandpass...")
 bandpass(
     vis=vis,
@@ -294,6 +328,7 @@ bandpass(
     solint='inf',
     refant='{refant}',
     minsnr=3.0,
+    solnorm={solnorm},
     gaintable=['{caltable_g}'],
 )
 
@@ -339,8 +374,7 @@ print(f"SUCCESS: {round_name} complete")
                 command=command,
                 name=f"selfcal_{round_name}_{spw}_{field}",
                 job_subdir=field_dir,
-                ppn=ppn,
-                walltime=resources.get('walltime', '02:00:00')
+                **submit_resources(resources, '02:00:00', ppn=ppn)
             )
             
             if job.job_id:
@@ -476,8 +510,11 @@ def run_selfcal_loop(hk: Housekeeper,
             return None
 
         # 2. Image
-        run_wsclean(hk, config, ms_map, niter, f'pcal{round_num}', logger, whitelist, datacolumn='DATA', threshold=threshold)
-        
+        image_map = run_wsclean(hk, config, ms_map, niter, f'pcal{round_num}', logger, whitelist, datacolumn='DATA', threshold=threshold)
+        ms_map = check_imaging_results(ms_map, image_map, brotherhood, logger)
+        if ms_map is None:
+            return None
+
         # 3. Calibrate
         ms_map = run_gaincal_bandpass(
             hk, config, ms_map, refant, solint, 'p', True,
@@ -507,7 +544,10 @@ def run_selfcal_loop(hk: Housekeeper,
             return None
 
         # 2. Image
-        run_wsclean(hk, config, ms_map, niter, f'apcal{round_num}', logger, whitelist, datacolumn='DATA', threshold=threshold)
+        image_map = run_wsclean(hk, config, ms_map, niter, f'apcal{round_num}', logger, whitelist, datacolumn='DATA', threshold=threshold)
+        ms_map = check_imaging_results(ms_map, image_map, brotherhood, logger)
+        if ms_map is None:
+            return None
 
         # 3. Calibrate
         ms_map = run_gaincal_bandpass(
@@ -556,13 +596,20 @@ def run_selfcal_loop(hk: Housekeeper,
     for stokes in stokes_list:
         save_sources = (stokes == 'I')
         logger.info(f"Imaging Stokes {stokes} (save_sources={save_sources})...")
-        
-        run_wsclean(
+
+        image_map = run_wsclean(
             hk, config, ms_map, final_niter, f'final_{stokes}',
             logger, whitelist, datacolumn='DATA', use_masks=True,
             stokes=stokes, save_source_list=save_sources,
             threshold=final_threshold
         )
+
+        # The final Stokes I image is the selfcal deliverable (and DDCal
+        # input) - a field without one is a failed field
+        if stokes == 'I':
+            ms_map = check_imaging_results(ms_map, image_map, brotherhood, logger)
+            if ms_map is None:
+                return None
     
     logger.info(f"Selfcal complete. Remaining fields: {list(ms_map.keys())}")
     return ms_map
