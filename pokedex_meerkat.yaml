@@ -1,27 +1,33 @@
 # =============================================================================
-# CHARIZARD - MeerKAT (linear feeds), total intensity, cross-cal -> selfcal
+# CHARIZARD - MeerKAT S-band, total intensity, cross-cal -> selfcal
+# Observation: 28-Feb-2026, 1750-2625 MHz, 4096 ch, 59 antennas, 963 dumps
 # Target cluster: NCRA bhima (OpenPBS)
 # =============================================================================
 # Usage: charizard run pokedex_meerkat.yaml -s scheduler_bhima.yaml
 #
-# Everything marked UPDATE needs your values. Check field names against
-# `listobs` before running - they must match the MS exactly.
+# Fields in this MS (from listobs):
+#   J0408-6545     fluxcal bpcal delaycal  -> amp
+#   J0219+0120     gaincal   (for J0159.8-0849)
+#   J0242-2132     gaincal   (for J0242.5-2132)
+#   J0159.8-0849   target
+#   J0242.5-2132   target
+#   J0521+1638     polcal (3C138) - NOT imaged, see targets override below
 #
-# Feed basis is auto-detected from the MS POLARIZATION table. With no
-# leakage/pol_angle calibrator set, CHARIZARD splits XX,YY only and images
-# Stokes I - which is what you want for a first run.
+# No leakage/pol_angle set, so CHARIZARD splits XX,YY only, solves gaintype G
+# with parang=False, and images Stokes I.
 # =============================================================================
 
 environment:
-  working_dir: /home/YOUR_USER/data           # UPDATE
+  working_dir: /home/apal/data                # UPDATE if different
   scheduler: pbs                              # bhima is OpenPBS
   shell_preamble: |
     source ~/.bashrc
     micromamba activate 312data
-    export UDOCKER_DIR=/home/YOUR_USER/udocker   # UPDATE
+    export UDOCKER_DIR=/home/apal/udocker
 
   container:
-    name: charizard                           # from `charizard setup env`
+    image: apal52/charizard-pipeline:latest
+    name: charizard
     volumes: []                               # extra bind-mounts, e.g. [/scratch:/scratch]
 
   # Walltimes MUST be quoted - unquoted 12:00:00 is YAML sexagesimal (an int).
@@ -42,8 +48,8 @@ environment:
 
 data:
   ms: TARGET.ms                               # UPDATE
-  # 4 sub-bands out of MeerKAT L-band 4k mode (~922 chan each after 5% edge trim).
-  # Raise for 32k mode.
+  # 4096 ch -> 5% edge trim -> 3688 usable -> 922 ch per sub-band,
+  # ~197 MHz each at 213.6 kHz resolution.
   processing_spw: 4
 
 sources:
@@ -54,18 +60,30 @@ sources:
 
   overrides:
     calibrators:
-      # Flux/bandpass cal. J1939-6342 -> Stevens-Reynolds 2016 automatically;
-      # J0408-6545 -> manual model built from the SARAO coefficients.
-      # Aliases 1934-638 / PKS B1934-638 also resolve correctly.
-      amp: J1939-6342                         # UPDATE to match listobs
-      phase: J0011-1434                       # UPDATE
-      # Leave leakage/pol_angle unset for total intensity. Setting both (with a
-      # pol_angle source that has a full Stokes model) switches on full polcal:
-      # 4-correlation split, gaintype T, Dflls + XYf+QU.
+      # J0408-6545 has no CASA flux standard. CHARIZARD builds a manual setjy
+      # model from the SARAO/Partridge log-polynomial, refit onto setjy's
+      # fluxdensity/spix form at this MS's centre frequency. The conversion is
+      # exact and band-independent, so the published coefficients hold at
+      # S-band with no adjustment.
+      amp: J0408-6545
+
+      # Both gain calibrators. fluxscale bootstraps each of them off J0408-6545.
+      phase: [J0219+0120, J0242-2132]
+
+      # REQUIRED. Without this, every field not listed as a calibrator becomes a
+      # target - which would send J0521+1638 (3C138, the polcal) through selfcal
+      # and a full 6144px clean for nothing.
+      targets: [J0159.8-0849, J0242.5-2132]
+
+      # Leave leakage/pol_angle unset for total intensity. Setting both would
+      # switch on full polcal (4-corr split, gaintype T, Dflls + XYf+QU).
+      # NOTE if you do: the bundled 3C138 model is L-band (p=0.075 at 1.4 GHz);
+      # at 2.19 GHz it is closer to p=0.10, so it needs S-band values first.
+
     uvranges:
-      # J1939-6342 is an unresolved point source at L-band - no cut needed.
-      # J0408-6545 has a ~1% double 5.5' away; add a cut here if it shows up
-      # as structure in the bandpass.
+      # J0408-6545 has a ~1% double lobe 5.5' away. At S-band the smaller
+      # primary beam suppresses it and a point model is adequate (Hugo 2022,
+      # Ranchod et al. 2024) - add a cut here only if the bandpass shows ripple.
       {}
 
 flow:
@@ -75,9 +93,9 @@ flow:
       bad_antennas: {auto: true, list: []}    # add known-bad dishes to `list`
       use_gpu: true                           # routes to bhima04 via scheduler_bhima.yaml
     calibration:
-      # refant omitted on purpose -> auto-selected after flagging, from the
-      # antenna names actually in the MS. Pin one (e.g. m008) only if you have
-      # a reason to; MeerKAT names are m000-m063, NOT C00.
+      # refant omitted on purpose -> auto-selected after flagging from the
+      # antennas actually present. This array has 59 of 64 dishes: m020, m030,
+      # m034, m040 and m060 are absent, so do not hardcode one of those.
       # refant: m008
       minblperant: 4                          # MeerKAT/IDIA convention
       control: {plot: true}                   # shadems diagnostics
@@ -89,18 +107,20 @@ flow:
       avg_flag: true
 
       # Channel averaging before selfcal. Bandwidth smearing goes as
-      # (dnu/nu) * (theta / theta_res). With 4 sub-bands, freqbin 4 gives
-      # ~0.93 MHz channels -> ~0.4 at 1 deg off axis (acceptable).
-      # freqbin 10 gives ~2.3 MHz -> ~1.0, which visibly smears the field edge.
-      # Raise it only if you are staying near the phase centre.
+      # (dnu/nu) * (theta / theta_res). freqbin 4 gives ~0.85 MHz channels;
+      # at the 0.35 deg half-power radius that is ~0.19, comfortably small.
+      # S-band tolerates more averaging than L-band because nu is higher, but
+      # the beam is also narrower - 4 is a safe starting point.
       freqbin: 4
 
-      # MeerKAT L-band: ~7.7 km max baseline -> ~6.3" synthesised beam at
-      # 1.28 GHz, so 1.5" gives ~4 px/beam. 6144 px = 2.56 deg, covering the
-      # ~1.2 deg primary beam out past the first null.
+      # S-BAND, not L-band. 7.7 km max baseline at 2.19 GHz (lambda 13.7 cm)
+      # -> ~3.7" synthesised beam, so 0.9" gives ~4 px/beam. An L-band 1.5"
+      # cell would undersample this badly.
+      # Primary beam FWHM is ~0.71 deg here (vs ~1.2 deg at L-band), so
+      # 6144 px x 0.9" = 1.54 deg covers it out past the half-power point.
       # NOTE: no primary beam correction is applied - fluxes far off axis are
       # attenuated.
-      imaging: {imsize: 6144, cellsize: 1.5asec}
+      imaging: {imsize: 6144, cellsize: 0.9asec}
 
       # factor is the single progression knob: each round multiplies niter by
       # it and divides threshold and solint by it.
