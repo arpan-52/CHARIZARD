@@ -21,6 +21,11 @@ from ..general.resources import submit_resources
 # workers stay well inside a normal node allocation.
 CHUNK_BYTES = 256 * 1024 ** 2
 
+# Grace period for a finished job's output file to become visible. Covers the
+# scheduler staging output back from the execution node and shared-filesystem
+# metadata lag. Only paid in full when a job genuinely produced nothing.
+ARTIFACT_WAIT_SECONDS = 30.0
+
 
 def remove_table_lock(ms_path: str):
     """Remove table lock file if exists."""
@@ -55,6 +60,42 @@ def get_ms_info_for_antenna(ms_path: str):
         return scans, fields, spws, ant_names, nchan, mock_ants
     finally:
         remove_table_lock(ms_path)
+
+
+def _wait_for_artifacts(paths, timeout: float = None,
+                        interval: float = 2.0) -> set:
+    """Wait for job output files to appear and be non-empty.
+
+    Guards two races at once: the scheduler staging a finished job's files back,
+    and shared-filesystem metadata lag between the compute node that wrote the
+    file and the login node checking for it.
+
+    All paths share one deadline, so a genuine failure costs `timeout` once
+    rather than once per SPW, and it returns as soon as everything is ready.
+
+    Returns:
+        The subset of `paths` that became usable.
+    """
+    if timeout is None:
+        timeout = ARTIFACT_WAIT_SECONDS
+
+    deadline = time.time() + timeout
+    pending = set(paths)
+    ready = set()
+
+    while True:
+        for path in list(pending):
+            try:
+                if os.path.getsize(path) > 0:
+                    ready.add(path)
+                    pending.discard(path)
+            except OSError:
+                pass  # not visible yet
+
+        if not pending or time.time() >= deadline:
+            return ready
+
+        time.sleep(interval)
 
 
 def _parallel_hand_indices(npols: int):
@@ -521,24 +562,30 @@ python3 {script_file}
     successful = []
     failed = []
     
+    # The artifact is the verdict, not the log - same rule run_split uses.
+    # A short job can leave the queue before the scheduler has staged its .out
+    # back, and housekeeper reports that as "No log files found" -> failure,
+    # even though the job succeeded. Log problems are worth reporting, but only
+    # a missing or empty badants.txt actually means the step failed.
     for job_id, (job, log_result) in results.items():
         spw = job_map.get(job_id, 'unknown')
-        
+
         if not log_result.success:
-            failed.append(spw)
-            logger.error(f"{spw}: FAILED")
+            logger.warning(f"{spw}: bad antenna job had log errors")
             if log_result.error_lines:
                 for err in log_result.error_lines[:5]:
-                    logger.error(f"  >> {err}")
-            continue
-        
-        # Check output exists
-        if os.path.exists(f"{spw}/badants.txt"):
+                    logger.warning(f"  >> {err}")
+
+    spws = list(job_map.values())
+    ready = _wait_for_artifacts([f"{s}/badants.txt" for s in spws])
+
+    for spw in spws:
+        if f"{spw}/badants.txt" in ready:
             successful.append(spw)
             logger.info(f"{spw}: OK")
         else:
             failed.append(spw)
-            logger.error(f"{spw}: Missing badants.txt")
+            logger.error(f"{spw}: FAILED (no usable {spw}/badants.txt)")
     
     if not successful:
         return None
@@ -610,26 +657,33 @@ python3 {script_file}
     successful = []
     refants = []
     
+    # Artifact decides, not the log - see the note in run_bad_antenna_detection.
     for job_id, (job, log_result) in results.items():
         spw = job_map.get(job_id, 'unknown')
-        
         if not log_result.success:
-            logger.warning(f"{spw}: Refant finding failed")
+            logger.warning(f"{spw}: refant job had log errors")
             if log_result.error_lines:
                 for err in log_result.error_lines[:3]:
-                    logger.error(f"  >> {err}")
-            continue
-        
-        # Read refant
+                    logger.warning(f"  >> {err}")
+
+    spws = list(job_map.values())
+    ready = _wait_for_artifacts([f"{s}/refant.json" for s in spws])
+
+    for spw in spws:
         refant_file = f"{spw}/refant.json"
-        if os.path.exists(refant_file):
+
+        if refant_file not in ready:
+            logger.warning(f"{spw}: missing {refant_file}")
+            continue
+
+        try:
             with open(refant_file, 'r') as f:
                 data = json.load(f)
-                refants.append(data['best_refant'])
-                successful.append(spw)
-                logger.info(f"{spw}: OK (refant: {data['best_refant']})")
-        else:
-            logger.warning(f"{spw}: Missing refant.json")
+            refants.append(data['best_refant'])
+            successful.append(spw)
+            logger.info(f"{spw}: OK (refant: {data['best_refant']})")
+        except (ValueError, KeyError, OSError) as e:
+            logger.warning(f"{spw}: could not read {refant_file}: {e}")
     
     if not refants:
         return successful if successful else None, None

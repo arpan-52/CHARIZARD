@@ -18,7 +18,7 @@
 # =============================================================================
 
 environment:
-  working_dir: /home/apal/data                # UPDATE if different
+  working_dir: /home/apal/highzmeerkat/s_7_8                # UPDATE if different
   scheduler: pbs                              # bhima is OpenPBS
   shell_preamble: |
     source ~/.bashrc
@@ -47,7 +47,7 @@ environment:
     imaging:   {nodes: 1, ppn: 8,  walltime: "24:00:00", mem_gb: 256}
 
 data:
-  ms: TARGET.ms                               # UPDATE
+  ms: s_7_8.ms                               # UPDATE
   # 4096 ch -> 5% edge trim -> 3688 usable -> 922 ch per sub-band,
   # ~197 MHz each at 213.6 kHz resolution.
   processing_spw: 4
@@ -124,7 +124,7 @@ flow:
 
       # factor is the single progression knob: each round multiplies niter by
       # it and divides threshold and solint by it.
-      loops: {phase: 3, amp_phase: 2, solint: 4min, min_solint: 16s, factor: 2}
+      loops: {phase: 3, amp_phase: 0, solint: 2min, min_solint: 30s, factor: 2}
       clean: {threshold: 0.0005, start_iters: 2000, min_threshold: 0.0}
 
 # Direction-dependent calibration. Left out deliberately for a first run -
