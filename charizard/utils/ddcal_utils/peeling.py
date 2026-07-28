@@ -12,6 +12,7 @@ import time
 from typing import List, Optional
 
 from housekeeper import Housekeeper
+from ..general.jobs import wait_and_check
 from ..general.resources import submit_resources
 
 from ..container import build_udocker_prefix
@@ -135,7 +136,7 @@ def run_ddcal_peeling(hk: Housekeeper,
     
     logger.info(f"Submitted CrystalBall job: {job.job_id}")
     
-    results = hk.wait_and_check([job.job_id], whitelist=whitelist)
+    results = wait_and_check(hk, [job.job_id], whitelist=whitelist, logger=logger)
     job_result = results.get(job.job_id)
     if job_result:
         job_obj, log_result = job_result
@@ -221,7 +222,7 @@ echo "SUCCESS: QuartiCal peeling complete -> PEELED_DATA"
     
     logger.info(f"Submitted QuartiCal job: {job.job_id}")
     
-    results = hk.wait_and_check([job.job_id], whitelist=whitelist)
+    results = wait_and_check(hk, [job.job_id], whitelist=whitelist, logger=logger)
     job_result = results.get(job.job_id)
     if job_result:
         job_obj, log_result = job_result
@@ -297,7 +298,7 @@ echo "SUCCESS: Final image created"
     
     logger.info(f"Submitted WSClean job: {job.job_id}")
     
-    results = hk.wait_and_check([job.job_id], whitelist=whitelist)
+    results = wait_and_check(hk, [job.job_id], whitelist=whitelist, logger=logger)
     job_result = results.get(job.job_id)
     if job_result:
         job_obj, log_result = job_result

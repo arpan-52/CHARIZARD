@@ -8,6 +8,7 @@ import time
 from typing import List, Optional, Dict
 
 from housekeeper import Housekeeper
+from ..general.jobs import wait_and_check
 from ..general.resources import submit_resources
 from ..container import build_udocker_prefix
 
@@ -103,7 +104,7 @@ print("Applied {flag_file} to {ms_path}")
     
     # Wait for jobs
     logger.substep(f"Waiting for {len(job_ids)} initial flagging jobs...")
-    results = hk.wait_and_check(job_ids, whitelist=whitelist)
+    results = wait_and_check(hk, job_ids, whitelist=whitelist, logger=logger)
     
     successful = []
     failed = []

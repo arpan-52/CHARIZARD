@@ -8,6 +8,7 @@ import time
 from typing import List, Dict, Optional, Tuple
 
 from housekeeper import Housekeeper
+from ..general.jobs import wait_and_check
 from ..general.resources import submit_resources
 from ..container import build_udocker_prefix
 
@@ -203,7 +204,7 @@ def run_wsclean(hk: Housekeeper,
     
     # Wait for all jobs
     logger.substep(f"Waiting for {len(job_ids)} wsclean jobs...")
-    results = hk.wait_and_check(job_ids, whitelist=whitelist)
+    results = wait_and_check(hk, job_ids, whitelist=whitelist, logger=logger)
     
     # Collect results - job must succeed AND the MFS image must exist,
     # otherwise MODEL_DATA was never written and gaincal would silently

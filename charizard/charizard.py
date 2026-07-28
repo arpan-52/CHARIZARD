@@ -30,6 +30,7 @@ from housekeeper import Housekeeper
 from .utils.general.ms_utils import get_ms_info
 from .utils.general.source_utils import build_calibration_plan
 from .utils.general.tracker import JobTracker
+from .utils.general.jobs import wait_and_check
 from .utils.splitting_utils.splitter import run_split
 from .utils.flagging_utils.antenna_analysis import run_bad_antenna_detection, run_find_refant
 from .utils.flagging_utils.initial_flagger import run_initial_flagging
@@ -394,7 +395,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
     # Wait for calibration
     logger.substep("Waiting for calibration round 1...")
     if cal_job_ids:
-        results = hk.wait_and_check(cal_job_ids, whitelist=whitelist)
+        results = wait_and_check(hk, cal_job_ids, whitelist=whitelist, logger=logger)
         
         successful = []
         failed_spws = []
@@ -561,7 +562,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         if src_flag_job_ids:
             logger.substep("Checking if source flagging completed...")
             logger.info(f"Waiting for {len(src_flag_job_ids)} source flagging jobs...")
-            results = hk.wait_and_check(src_flag_job_ids, whitelist=whitelist, timeout=300)
+            results = wait_and_check(hk, src_flag_job_ids, whitelist=whitelist, timeout=300, logger=logger)
             
             src_flag_ok = 0
             src_flag_fail = 0

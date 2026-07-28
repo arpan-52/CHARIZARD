@@ -17,6 +17,7 @@ import yaml
 from typing import List, Dict, Optional
 
 from housekeeper import Housekeeper
+from ..general.jobs import wait_and_check
 from ..general.resources import submit_resources
 from ..container import build_udocker_prefix
 
@@ -390,7 +391,7 @@ print(f"SUCCESS: {round_name} complete")
     
     # Wait - housekeeper handles whitelist
     logger.substep(f"Waiting for {len(job_ids)} gaincal+bandpass jobs...")
-    results = hk.wait_and_check(job_ids, whitelist=whitelist)
+    results = wait_and_check(hk, job_ids, whitelist=whitelist, logger=logger)
     
     # Build new ms_map
     new_ms_map = {field: [] for field in ms_map.keys()}

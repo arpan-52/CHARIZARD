@@ -17,6 +17,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from housekeeper import Housekeeper
+from ..general.jobs import wait_and_check
 from ..general.resources import submit_resources
 from ..container import build_udocker_prefix
 
@@ -305,7 +306,7 @@ def run_split(hk: Housekeeper,
 
     # Wait for all jobs
     logger.substep(f"Waiting for {len(job_ids)} split jobs...")
-    results = hk.wait_and_check(job_ids, whitelist=whitelist)
+    results = wait_and_check(hk, job_ids, whitelist=whitelist, logger=logger)
 
     for job_id, (job, log_result) in results.items():
         spw = job_map.get(job_id, 'unknown')

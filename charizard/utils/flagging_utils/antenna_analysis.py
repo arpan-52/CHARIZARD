@@ -15,16 +15,20 @@ from collections import defaultdict
 from multiprocessing import Pool
 
 from casacore import tables
+from ..general.jobs import refresh_dir, wait_and_check
 from ..general.resources import submit_resources
 
 # Peak bytes of DATA+FLAG held in memory per read. Sized so that ppn parallel
 # workers stay well inside a normal node allocation.
 CHUNK_BYTES = 256 * 1024 ** 2
 
-# Grace period for a finished job's output file to become visible. Covers the
-# scheduler staging output back from the execution node and shared-filesystem
-# metadata lag. Only paid in full when a job genuinely produced nothing.
-ARTIFACT_WAIT_SECONDS = 30.0
+# Grace period for a finished job's output file to become visible here.
+#
+# The file is written by a compute node and read back on the submit host - a
+# different NFS client, which with default mount options can lag by up to
+# `acdirmax` (60 s) before it sees the new entry. 150 s clears that with margin.
+# Only paid in full when a job genuinely produced nothing.
+ARTIFACT_WAIT_SECONDS = 150.0
 
 
 def remove_table_lock(ms_path: str):
@@ -94,6 +98,10 @@ def _wait_for_artifacts(paths, timeout: float = None,
 
         if not pending or time.time() >= deadline:
             return ready
+
+        # Re-read the containing directories so a cached NFS client revalidates
+        for path in pending:
+            refresh_dir(path)
 
         time.sleep(interval)
 
@@ -556,7 +564,7 @@ python3 {script_file}
     
     # Wait for jobs
     logger.substep(f"Waiting for {len(job_ids)} bad antenna jobs...")
-    results = hk.wait_and_check(job_ids, whitelist=whitelist)
+    results = wait_and_check(hk, job_ids, whitelist=whitelist, logger=logger)
     
     # Process results
     successful = []
@@ -651,7 +659,7 @@ python3 {script_file}
     
     # Wait for jobs
     logger.substep(f"Waiting for {len(job_ids)} refant jobs...")
-    results = hk.wait_and_check(job_ids, whitelist=whitelist)
+    results = wait_and_check(hk, job_ids, whitelist=whitelist, logger=logger)
     
     # Process results
     successful = []
