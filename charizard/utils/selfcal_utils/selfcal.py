@@ -4,9 +4,10 @@ Self-calibration loop.
 
 Flow per round:
 1. Catboss (GPU, parallel) on DATA
-2. Nimki (CPU, parallel) on DATA  
-3. Image (wsclean)
-4. Calibrate (gaincal + bandpass + applycal + mstransform)
+2. Image (wsclean)
+3. Calibrate (gaincal + bandpass + applycal + mstransform)
+
+NIMKI is not used in selfcal - it is a calibrator-only flagger.
 
 Brotherhood: if ANY SPW fails and brotherhood=True → STOP
 """
@@ -23,7 +24,8 @@ from ..container import build_udocker_prefix
 
 # Import existing flagging functions
 from ..flagging_utils.catboss import run_catboss
-from ..flagging_utils.nimki import run_nimki
+# NIMKI is intentionally not imported here - it is calibrator-only,
+# see run_selfcal_flagging()
 
 
 def parse_solint_seconds(solint: str) -> float:
@@ -91,9 +93,13 @@ def run_selfcal_flagging(hk: Housekeeper,
                          whitelist: List[str],
                          brotherhood: bool) -> Optional[Dict[str, List[str]]]:
     """
-    Run catboss (GPU) then nimki (CPU) on selfcal MS files.
-    Uses existing run_catboss and run_nimki functions.
-    
+    Run catboss (GPU) on selfcal MS files.
+
+    NIMKI is deliberately not used here. It is a calibrator-only flagger: the
+    UV-domain Gabor model it fits assumes a compact, well-behaved source, which
+    is precisely what a target field is not. Running it on target data risks
+    clipping real sky structure. catboss pooh handles the target fields.
+
     Returns:
         Updated ms_map, or None if failure and brotherhood=True
     """
@@ -155,37 +161,7 @@ def run_selfcal_flagging(hk: Housekeeper,
             return None
         else:
             logger.warning(f"Catboss failed for {failed_spws}, continuing with {result_spws}")
-    
-    active_spws = result_spws
-    prev_spws = active_spws.copy()
-    
-    # Step 2: Nimki (CPU)
-    logger.substep(f"Nimki for {round_name}...")
-    result_spws = run_nimki(
-        hk=hk,
-        config=config,
-        active_spws=active_spws,
-        ms_names=ms_names,
-        datacolumn='DATA',
-        logger=logger,
-        whitelist=whitelist,
-        sigma=20.0,
-        prefix=f'sc_{round_name}'
-    )
-    
-    if result_spws is None:
-        logger.error("ALL SPWs failed nimki!")
-        return None
-    
-    # Check for failures
-    failed_spws = set(prev_spws) - set(result_spws)
-    if failed_spws:
-        if brotherhood:
-            logger.error(f"Brotherhood=True, nimki failed for: {failed_spws}, stopping!")
-            return None
-        else:
-            logger.warning(f"Nimki failed for {failed_spws}, continuing with {result_spws}")
-    
+
     # Build updated ms_map with only successful SPWs
     new_ms_map = {}
     for field, ms_list in ms_map.items():
@@ -505,7 +481,7 @@ def run_selfcal_loop(hk: Housekeeper,
 
         logger.substep(f"=== Phase cal round {round_num}/{phase_rounds} (solint={solint}, niter={niter}, threshold={threshold}) ===")
 
-        # 1. Flag (catboss + nimki)
+        # 1. Flag (catboss; nimki is calibrator-only, see run_selfcal_flagging)
         ms_map = run_selfcal_flagging(hk, config, ms_map, f'pcal{round_num}', logger, whitelist, brotherhood)
         if ms_map is None:
             return None
@@ -539,7 +515,7 @@ def run_selfcal_loop(hk: Housekeeper,
 
         logger.substep(f"=== Amp+phase cal round {round_num}/{ap_rounds} (solint={solint}, niter={niter}, threshold={threshold}) ===")
 
-        # 1. Flag (catboss + nimki)
+        # 1. Flag (catboss; nimki is calibrator-only, see run_selfcal_flagging)
         ms_map = run_selfcal_flagging(hk, config, ms_map, f'apcal{round_num}', logger, whitelist, brotherhood)
         if ms_map is None:
             return None

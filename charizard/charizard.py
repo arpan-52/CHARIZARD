@@ -633,13 +633,16 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         prefix='final'
     )
     
-    # Nimki on ALL (cal.ms + src.ms) in parallel
-    logger.substep(f"Running NIMKI on {ms_to_flag}...")
+    # NIMKI on calibrators only. Its UV-domain Gabor model assumes a compact,
+    # well-behaved source; on a target field the sky structure is what we are
+    # trying to image, so fitting and clipping against that model is not
+    # appropriate. catboss pooh above already covers src.ms.
+    logger.substep("Running NIMKI on ['cal.ms']...")
     run_nimki(
         hk=hk,
         config=config,
         active_spws=active_spws,
-        ms_names=ms_to_flag,
+        ms_names=['cal.ms'],
         datacolumn='CORRECTED_DATA',
         logger=logger,
         whitelist=whitelist,
@@ -760,24 +763,10 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                         logger.warning("Catboss failed on all SPWs")
                     else:
                         active_spws_sc = result_spws
-                    
-                    # Nimki (CPU)
-                    logger.substep("Running nimki on selfcal MS...")
-                    result_spws = run_nimki(
-                        hk=hk,
-                        config=config,
-                        active_spws=active_spws_sc,
-                        ms_names=ms_names_sc,
-                        datacolumn='DATA',
-                        logger=logger,
-                        whitelist=whitelist,
-                        sigma=5.0,
-                        prefix='sc_init'
-                    )
-                    
-                    if result_spws is None:
-                        logger.warning("Nimki failed on all SPWs")
-                    
+
+                    # NIMKI is deliberately not run here. It is a calibrator-only
+                    # flagger: its UV-domain Gabor model assumes a compact source,
+                    # which is exactly what a target field is not.
                     logger.info("Initial selfcal flagging complete")
             
             # Dirty image if requested
