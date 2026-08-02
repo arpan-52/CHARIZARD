@@ -10,6 +10,10 @@ import time
 from typing import List, Optional, Dict
 
 from housekeeper import Housekeeper
+from ..general.jobs import wait_and_check
+from ..general.resources import submit_resources
+
+from ..container import build_udocker_prefix
 
 
 # Hardcoded catboss defaults
@@ -50,36 +54,38 @@ CATBOSS_DEFAULTS = {
 def build_catboss_command(ms_path: str,
                           stage: str = 'initial',
                           datacolumn: str = 'DATA',
-                          max_threads: int = 32,
-                          max_memory: float = 0.8) -> str:
+                          max_memory: float = 0.8,
+                          use_gpu: bool = True) -> str:
     """
-    Build catboss command string.
-    
+    Build catboss pooh command string.
+
     Args:
-        ms_path: Path to measurement set
-        stage: Stage name ('initial', 'postcal', 'final')
+        ms_path:    Path to measurement set
+        stage:      Stage name ('initial', 'postcal', 'final', 'residual')
         datacolumn: Data column to flag
-        max_threads: Maximum threads
-        max_memory: Maximum memory usage (fraction)
-    
+        max_memory: Maximum memory fraction (default 0.8)
+        use_gpu:    Use GPU mode (default True)
+
     Returns:
-        catboss command string
+        catboss pooh command string
     """
     defaults = CATBOSS_DEFAULTS.get(stage, CATBOSS_DEFAULTS['initial'])
-    
-    cmd = f"catboss --cat pooh {ms_path}"
+    mode = 'gpu' if use_gpu else 'cpu'
+
+    cmd = f"catboss pooh {ms_path}"
+    cmd += f" --method sumthreshold"
     cmd += f" --combinations {defaults['combinations']}"
     cmd += f" --sigma {defaults['sigma']}"
     cmd += f" --rho {defaults['rho']}"
-    cmd += f" --poly-degree {defaults['poly_degree']}"
+    cmd += f" --poly-order {defaults['poly_degree']}"
     cmd += f" --deviation-threshold {defaults['deviation_threshold']}"
     cmd += f" --datacolumn {datacolumn}"
     cmd += f" --apply-flags"
     cmd += f" --propagate-flags"
-    cmd += f" --max-threads {max_threads}"
-    cmd += f" --max-memory-usage {max_memory}"
+    cmd += f" --mode {mode}"
+    cmd += f" --max-memory {max_memory}"
     cmd += f" --verbose"
-    
+
     return cmd
 
 
@@ -146,29 +152,29 @@ def run_catboss(hk: Housekeeper,
                 ms_path=ms_path,
                 stage=stage,
                 datacolumn=datacolumn,
-                max_threads=ppn,
-                max_memory=0.8
+                max_memory=0.8,
+                use_gpu=use_gpu
             )
             commands.append(cmd)
-        
+
         if not commands:
             continue
-        
+
         job_name = f"catboss_{stage}_{prefix}_{spw}" if prefix else f"catboss_{stage}_{spw}"
-        batch_script = '\n'.join(commands)
-        
+        udocker = build_udocker_prefix(config)
+        batch_script = f"\n{udocker} ".join(commands)
+
         command = f"""cd {os.getcwd()}
 {preamble}
-{batch_script}
+{udocker} {batch_script}
 """
-        
+
         job = hk.submit(
             command=command,
             name=job_name,
             job_subdir=spw,
-            ppn=ppn,
-            walltime=resources.get('walltime', '08:00:00'),
-            gpu=use_gpu
+            gpu=use_gpu,
+            **submit_resources(resources, '08:00:00', ppn=ppn)
         )
         
         if job.job_id:
@@ -188,7 +194,7 @@ def run_catboss(hk: Housekeeper,
     
     # Wait for jobs - housekeeper handles whitelist
     logger.substep(f"Waiting for {len(job_ids)} catboss jobs...")
-    results = hk.wait_and_check(job_ids, whitelist=whitelist)
+    results = wait_and_check(hk, job_ids, whitelist=whitelist, logger=logger)
     
     successful = []
     failed = []

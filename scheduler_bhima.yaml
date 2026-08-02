@@ -1,0 +1,62 @@
+# Scheduler config for NCRA Bhima cluster (OpenPBS)
+# Usage: charizard run pokedex_bhima.yaml -s scheduler_bhima.yaml
+
+scheduler: pbs
+
+# Where job scripts and PBS -o/-e output land. Overrides charizard's default of
+# <working_dir>/jobs, and is also where wait_and_check() looks - the two cannot
+# disagree.
+#
+# This MUST be on /home, not /scratch. Jobs write data to /scratch perfectly
+# well, but PBS never delivers their .out files there, so every job comes back
+# as "No log files found" and the pipeline aborts a step that actually
+# succeeded. That is what killed the first s_1_2 attempt at INITIAL FLAGGING.
+#
+# Keep the LAST-BUT-ONE component per dataset. Job names (split_spw0,
+# flag_init_cal_spw0, ...) are identical across runs, so a shared job_dir means
+# two datasets overwrite each other's logs and share one housekeeper.db - and a
+# stale .out from a previous run reads as the current job's result.
+job_dir: /home/apal/charizard-runs/s_1_2/jobs
+
+pbs:
+  # bhima uses OpenPBS (modern select syntax)
+  resource_style: select
+
+  queues:
+    default: workq  # normal CPU queue
+    gpu: gpu        # bhima04 is in this queue
+
+  gpu:
+    enabled: true
+    host: bhima04   # the one GPU node on bhima
+    ngpus: 1
+    modules:
+         # UPDATE if bhima has a different CUDA module name
+
+  # Added to every PBS job header
+  directives:
+    - "-V"          # export all env vars (picks up micromamba activation)
+    - "-j oe"       # merge stdout+stderr into one log file
+
+  # Modules loaded in every job
+  modules: []       # add cluster-wide modules here if needed (e.g. - gcc/11.3)
+
+  # Environment variables propagated to every job
+  env_vars:
+    # These only reach the jobs' CONTAINERS because charizard's
+    # build_udocker_prefix forwards them with --env. udocker does not inherit
+    # the host environment, so exporting them here alone is not enough - see
+    # THREAD_ENV_VARS in charizard/utils/container.py.
+    #
+    # Unset inside the container, each library sizes its pool from the NODE
+    # core count (64 here) while PBS confined the job to ncpus=8, giving ~209
+    # threads per catboss process. Full-scale A/B on bhima04, 4 concurrent
+    # jobs on the real MS (1711 baselines): catboss Prep 1092 s uncapped vs
+    # 13 s capped - 84x. Keep these equal to resources.*.ppn.
+    OMP_NUM_THREADS: "8"
+    # numba parallel=True regions read NUMBA_NUM_THREADS, NOT OMP_NUM_THREADS.
+    NUMBA_NUM_THREADS: "8"
+    # The bandpass polyfits are tiny (deg 5 over <=230 channels); a multi-thread
+    # BLAS pool is pure overhead there, and 64 of them per process is worse.
+    OPENBLAS_NUM_THREADS: "1"
+    MKL_NUM_THREADS: "1"

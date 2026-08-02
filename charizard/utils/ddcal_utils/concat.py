@@ -10,6 +10,9 @@ import time
 from typing import List, Dict, Optional
 
 from housekeeper import Housekeeper
+from ..general.jobs import wait_and_check
+from ..general.resources import submit_resources
+from ..container import build_udocker_prefix
 
 
 def concat_ms(hk: Housekeeper,
@@ -35,7 +38,6 @@ def concat_ms(hk: Housekeeper,
     logger.substep("Concatenating MS files for DDCal...")
     
     env = config.environment
-    casa_path = env.get('casa_path', '')
     preamble = env.get('shell_preamble', '')
     resources = config.resources.get('ddcal', config.resources.get('default', {}))
     ppn = resources.get('ppn', 4)
@@ -80,17 +82,17 @@ print(f"Combined MS: {{output_ms}}")
         with open(script_file, 'w') as f:
             f.write(script)
         
+        udocker = build_udocker_prefix(config)
         command = f"""cd {os.getcwd()}
 {preamble}
-{casa_path}/bin/casa --nologger --nogui -c {script_file}
+{udocker} casa --nologger --nogui -c {script_file}
 """
         
         job = hk.submit(
             command=command,
             name=f"concat_{field}",
             job_subdir=field_dir,
-            ppn=ppn,
-            walltime=resources.get('walltime', '02:00:00')
+            **submit_resources(resources, '02:00:00', ppn=ppn)
         )
         
         if job.job_id:
@@ -106,7 +108,7 @@ print(f"Combined MS: {{output_ms}}")
     
     # Wait for jobs
     logger.substep(f"Waiting for {len(job_ids)} concat jobs...")
-    results = hk.wait_and_check(job_ids, whitelist=whitelist)
+    results = wait_and_check(hk, job_ids, whitelist=whitelist, logger=logger)
     
     # Collect results
     output_map = {}

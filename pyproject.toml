@@ -14,7 +14,11 @@ dependencies = [
     "numpy",
     "pyyaml",
     "python-casacore",
+    "astropy",
+    "pandas",
     "rich",
+    "udocker",
+    "housekeeper @ git+https://github.com/arpan-52/housekeeper",
 ]
 
 [project.optional-dependencies]

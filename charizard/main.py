@@ -6,11 +6,13 @@ Entry point - parse args, define whitelist, call charizard()
 """
 
 import argparse
+import os
 import sys
 
 from .charizard import charizard
 from .utils.general.config_parser import parse_config
 from .utils.general.logging import PipelineLogger
+from .utils.container import setup_container, DEFAULT_IMAGE, DEFAULT_NAME
 
 
 # =============================================================================
@@ -30,6 +32,11 @@ ERROR_WHITELIST = [
     "Leap second table TAI_UTC seems out-of-date",
     "Until the table is updated (see the CASA documentation or your system admin)",
     "times and coordinates derived from UTC could be wrong by 1s or more.",
+    "no auto update is possible on this measurespath by this user",
+    "measurespath must exist as a directory and it must be owned by the user",
+    "The expected casa data was not found at measurespath",
+    "The expected measures data was not found at measurespath",
+    "visit https://casadocs.readthedocs.io",
     
     # QuartiCal/Numba warnings
     "NumbaPendingDeprecationWarning",
@@ -92,8 +99,8 @@ ERROR_WHITELIST = [
     "Warning: Model component",
     "No MODEL_DATA column found",
     "Creating MODEL_DATA column",
-    "NumbaDeprecationWarning: numba.generated_jit is deprecated"
-    
+    "NumbaDeprecationWarning: numba.generated_jit is deprecated",
+
     # General computation warnings
     "divide by zero encountered",
     "invalid value encountered",
@@ -102,9 +109,9 @@ ERROR_WHITELIST = [
     "NaN values detected",
     "Empty array passed",
     
-    # Nami warnings
-    "nami",
-    "Nami",
+    # Nimki warnings
+    "nimki",
+    "Nimki",
     
 
     # Concat 
@@ -118,39 +125,97 @@ ERROR_WHITELIST = [
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
+        prog="charizard",
         description="CHARIZARD - Radio Interferometry Calibration Pipeline",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  charizard setup env\n"
+            "  charizard setup env --image myrepo/myimage:latest --name mycontainer\n"
+            "  charizard setup env --cuda-lib-path /usr/lib\n"
+            "  charizard run pokedex.yaml\n"
+            "  charizard run pokedex.yaml -s scheduler.yaml\n"
+        )
     )
-    
-    parser.add_argument(
+
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>")
+    subparsers.required = True
+
+    # ── setup env ──────────────────────────────────────────────────────────
+    setup_parser = subparsers.add_parser(
+        "setup",
+        help="Setup the compute container environment"
+    )
+    setup_sub = setup_parser.add_subparsers(dest="setup_target", metavar="<target>")
+    setup_sub.required = True
+
+    env_parser = setup_sub.add_parser(
+        "env",
+        help="Pull image, create container, configure GPU"
+    )
+    env_parser.add_argument(
+        "--image",
+        default=DEFAULT_IMAGE,
+        help=f"Docker image to pull (default: {DEFAULT_IMAGE})"
+    )
+    env_parser.add_argument(
+        "--name",
+        default=DEFAULT_NAME,
+        help=f"Container name for udocker (default: {DEFAULT_NAME})"
+    )
+    env_parser.add_argument(
+        "--cuda-lib-path",
+        default=None,
+        metavar="PATH",
+        help="Path to host CUDA libs if auto-detect fails (e.g. /usr/lib)"
+    )
+
+    # ── run ────────────────────────────────────────────────────────────────
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run the calibration pipeline"
+    )
+    run_parser.add_argument(
         "config",
         help="Pokedex config file (YAML)"
     )
-    
-    parser.add_argument(
+    run_parser.add_argument(
         "--scheduler_config", "-s",
         help="Scheduler config file for housekeeper (YAML)"
     )
-    
-    parser.add_argument(
+    run_parser.add_argument(
         "--models", "-m",
         help="User models file with custom polcal models (YAML)"
     )
-    
+
     return parser.parse_args()
 
 
 def main():
     """Main entry point"""
     args = parse_args()
-    
-    # Parse config (with optional user models)
+
+    if args.command == "setup":
+        # charizard setup env [--image ...] [--name ...] [--cuda-lib-path ...]
+        ok = setup_container(
+            image=args.image,
+            name=args.name,
+            cuda_lib_path=args.cuda_lib_path
+        )
+        sys.exit(0 if ok else 1)
+
+    # charizard run pokedex.yaml
     config = parse_config(args.config, models_path=args.models)
-    
-    # Setup logger
+
+    # All job scripts and outputs are created relative to CWD, and the
+    # container only mounts working_dir - so run from there regardless of
+    # where the user launched charizard.
+    os.makedirs(config.working_dir, exist_ok=True)
+    os.chdir(config.working_dir)
+
     logger = PipelineLogger(config.working_dir)
     logger.banner("CHARIZARD PIPELINE")
-    
+
     logger.info(f"Config: {args.config}")
     if args.scheduler_config:
         logger.info(f"Scheduler config: {args.scheduler_config}")
@@ -158,13 +223,11 @@ def main():
         logger.info(f"User models: {args.models}")
     logger.info(f"MS: {config.ms_path}")
     logger.info(f"Working directory: {config.working_dir}")
-    
-    # Scheduler config
-    scheduler_config = args.scheduler_config
-    
-    # Run pipeline
+    if config.container:
+        logger.info(f"Container: {config.container.get('name', DEFAULT_NAME)}")
+
     try:
-        success = charizard(config, logger, scheduler_config, whitelist=ERROR_WHITELIST)
+        success = charizard(config, logger, args.scheduler_config, whitelist=ERROR_WHITELIST)
     except KeyboardInterrupt:
         logger.warning("Pipeline interrupted by user")
         success = False
@@ -173,11 +236,10 @@ def main():
         import traceback
         traceback.print_exc()
         success = False
-    
-    # Summary and save
+
     logger.print_summary()
     logger.save()
-    
+
     sys.exit(0 if success else 1)
 
 

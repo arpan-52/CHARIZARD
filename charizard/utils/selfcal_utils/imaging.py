@@ -8,6 +8,12 @@ import time
 from typing import List, Dict, Optional, Tuple
 
 from housekeeper import Housekeeper
+from ..general.jobs import wait_and_check
+from ..general.resources import submit_resources
+from ..container import build_udocker_prefix
+
+# Sub-image edge length for wsclean's -parallel-deconvolution
+PARALLEL_DECONV_SIZE = 2048
 
 
 def build_wsclean_command(ms_list: List[str],
@@ -52,18 +58,23 @@ def build_wsclean_command(ms_list: List[str],
     -pol {stokes} \\
     -data-column {datacolumn} \\
     -niter {niter} \\
-    -auto-mask 7 \\
+    -auto-mask 5 \\
     -auto-threshold 3 \\
     -gain 0.1 \\
     -mgain 0.7 \\
     -join-channels \\
     -multiscale \\
-    -no-negative \\
     -multiscale-scale-bias 0.6 \\
     -fit-spectral-pol 3 \\
     -fit-beam \\
     -padding 1.3"""
-    
+
+    # Split deconvolution into subimages above this size - a single-threaded
+    # multiscale clean over a full MeerKAT-sized image is the pipeline's main
+    # wall-clock and memory bottleneck.
+    if imsize > PARALLEL_DECONV_SIZE:
+        cmd += f" \\\n    -parallel-deconvolution {PARALLEL_DECONV_SIZE}"
+
     if niter > 0:
         cmd += f" \\\n    -threshold {threshold}"
     
@@ -88,7 +99,8 @@ def run_wsclean(hk: Housekeeper,
                 datacolumn: str = 'DATA',
                 use_masks: bool = False,
                 stokes: str = 'I',
-                save_source_list: bool = False) -> Optional[Dict[str, str]]:
+                save_source_list: bool = False,
+                threshold: float = None) -> Optional[Dict[str, str]]:
     """
     Run wsclean for all fields in parallel.
     
@@ -123,7 +135,9 @@ def run_wsclean(hk: Housekeeper,
     
     imsize = imaging_config.get('imsize', 4096)
     cellsize = imaging_config.get('cellsize', '1asec')
-    threshold = clean_config.get('threshold', 0.001)
+    # Per-round threshold from the selfcal schedule; fall back to static config.
+    if threshold is None:
+        threshold = clean_config.get('threshold', 0.001)
     
     # Create images directory
     os.makedirs('images', exist_ok=True)
@@ -163,18 +177,18 @@ def run_wsclean(hk: Housekeeper,
         with open(script_file, 'w') as f:
             f.write(f"#!/bin/bash\ncd {os.getcwd()}\n{preamble}\n{cmd}\n")
         os.chmod(script_file, 0o755)
-        
+
+        udocker = build_udocker_prefix(config)
         command = f"""cd {os.getcwd()}
 {preamble}
-{cmd}
+{udocker} {cmd}
 """
         
         job = hk.submit(
             command=command,
             name=f"wsclean_{prefix}_{field}",
             job_subdir=field_dir,
-            ppn=ppn,
-            walltime=resources.get('walltime', '04:00:00')
+            **submit_resources(resources, '04:00:00', ppn=ppn)
         )
         
         if job.job_id:
@@ -190,24 +204,29 @@ def run_wsclean(hk: Housekeeper,
     
     # Wait for all jobs
     logger.substep(f"Waiting for {len(job_ids)} wsclean jobs...")
-    results = hk.wait_and_check(job_ids, whitelist=whitelist)
+    results = wait_and_check(hk, job_ids, whitelist=whitelist, logger=logger)
     
-    # Collect results - just check if job succeeded, don't check files
+    # Collect results - job must succeed AND the MFS image must exist,
+    # otherwise MODEL_DATA was never written and gaincal would silently
+    # solve against a default point-source model
     image_map = {}
-    
+
     for job_id, (job, log_result) in results.items():
         field = job_map.get(job_id, 'unknown')
         image_path = f"images/{field}/{prefix}_{field}-MFS-image.fits"
         source_list_path = f"images/{field}/{prefix}_{field}-sources.txt"
-        
-        if log_result.success:
+
+        if log_result.success and os.path.exists(image_path):
             image_map[field] = {
                 'image': image_path,
                 'source_list': source_list_path if save_source_list else None
             }
             logger.info(f"{field}: OK")
         else:
-            logger.warning(f"{field}: wsclean had issues")
+            if log_result.success:
+                logger.warning(f"{field}: wsclean job finished but no image at {image_path}")
+            else:
+                logger.warning(f"{field}: wsclean had issues")
             if log_result.error_lines:
                 for err in log_result.error_lines[:3]:
                     logger.error(f"  >> {err}")

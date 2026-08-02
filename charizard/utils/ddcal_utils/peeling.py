@@ -1,7 +1,10 @@
 # charizard/utils/ddcal_utils/peeling.py
 """
-DDCal peeling using CrystalBall + QuartiCal (G + dE).
+DDCal peeling using CrystalBall + QuartiCal (K + dE).
 Peels all sources in one go.
+
+CrystalBall and QuartiCal live in the container's dedicated env:
+/opt/envs/quartical/bin/ - all invocations run inside udocker.
 """
 
 import os
@@ -9,6 +12,10 @@ import time
 from typing import List, Optional
 
 from housekeeper import Housekeeper
+from ..general.jobs import wait_and_check
+from ..general.resources import submit_resources
+
+from ..container import build_udocker_prefix
 
 
 def run_ddcal_peeling(hk: Housekeeper,
@@ -21,11 +28,11 @@ def run_ddcal_peeling(hk: Housekeeper,
                       whitelist: List[str]) -> Optional[str]:
     """
     Run DDCal peeling: CrystalBall + QuartiCal + Final Image.
-    
+
     1. CrystalBall: load all sources -> MODEL_DATA, then each peel source -> MODEL_SOURCE_N
-    2. QuartiCal: peel all sources in one go with G + dE
+    2. QuartiCal: peel all sources in one go with K + dE
     3. WSClean: final image on PEELED_DATA
-    
+
     Returns:
         Path to final image, or None if failed
     """
@@ -44,10 +51,9 @@ def run_ddcal_peeling(hk: Housekeeper,
     # Get peeling config
     ddcal_config = config.flow.get('dd_cal', {})
     peeling_config = ddcal_config.get('peeling', {})
-    g_time_interval = peeling_config.get('g_time_interval', '120s')
-    g_freq_interval = peeling_config.get('g_freq_interval', '10MHz')
+    time_chunk = peeling_config.get('time_chunk', 0)
     de_time_interval = peeling_config.get('de_time_interval', '120s')
-    de_freq_interval = peeling_config.get('de_freq_interval', '10MHz')
+    de_freq_interval = peeling_config.get('de_freq_interval', 0)
     
     # Get imaging config
     selfcal_config = config.flow.get('imaging_selfcal', {}).get('selfcal', {})
@@ -69,14 +75,11 @@ def run_ddcal_peeling(hk: Housekeeper,
     
     cb_lines = [
         f"#!/bin/bash",
-        f"cd {os.getcwd()}",
-        f"{preamble}",
-        f"",
         f"echo '=== CrystalBall for {field} ==='",
         f"",
         f"# First: load ALL sources into MODEL_DATA",
         f"echo 'Loading all sources -> MODEL_DATA'",
-        f"crystalball {ms_path} \\",
+        f"/opt/envs/quartical/bin/crystalball {ms_path} \\",
         f"    -sm {source_list_file} \\",
         f"    -o MODEL_DATA \\",
         f"    -j {ppn}",
@@ -97,7 +100,7 @@ def run_ddcal_peeling(hk: Housekeeper,
         cb_lines.extend([
             f"# Source {source_num}: {region_file} -> {model_col}",
             f"echo 'Source {source_num} -> {model_col}'",
-            f"crystalball {ms_path} \\",
+            f"/opt/envs/quartical/bin/crystalball {ms_path} \\",
             f"    -sm {source_list_file} \\",
             f"    -w {region_file} \\",
             f"    -o {model_col} \\",
@@ -119,12 +122,12 @@ def run_ddcal_peeling(hk: Housekeeper,
         f.write(cb_script)
     os.chmod(cb_script_file, 0o755)
     
+    udocker = build_udocker_prefix(config)
     job = hk.submit(
-        command=f"bash {os.getcwd()}/{cb_script_file}",
+        command=f"cd {os.getcwd()}\n{preamble}\n{udocker} bash {os.getcwd()}/{cb_script_file}",
         name=f"crystalball_{field}",
         job_subdir=output_dir,
-        ppn=ppn,
-        walltime=resources.get('walltime', '02:00:00')
+        **submit_resources(resources, '02:00:00', ppn=ppn)
     )
     
     if not job.job_id:
@@ -133,7 +136,7 @@ def run_ddcal_peeling(hk: Housekeeper,
     
     logger.info(f"Submitted CrystalBall job: {job.job_id}")
     
-    results = hk.wait_and_check([job.job_id], whitelist=whitelist)
+    results = wait_and_check(hk, [job.job_id], whitelist=whitelist, logger=logger)
     job_result = results.get(job.job_id)
     if job_result:
         job_obj, log_result = job_result
@@ -160,54 +163,14 @@ def run_ddcal_peeling(hk: Housekeeper,
     subtract_dirs = ','.join([str(i+1) for i in range(num_sources)])
     
     qc_script = f"""#!/bin/bash
-cd {os.getcwd()}
-{preamble}
-
 echo "=== QuartiCal Peeling for {field} ==="
 echo "Recipe: {recipe}"
 echo "Subtract directions: [{subtract_dirs}]"
 
-micromamba activate quartical
-
-# goquartical \\
-#     input_ms.path={ms_path} \\
-#     input_ms.data_column=DATA \\
-#     input_ms.time_chunk=0 \\
-#     input_ms.freq_chunk=0 \\
-#     input_model.recipe={recipe} \\
-#     solver.terms=[K,dE] \\
-#     solver.iter_recipe=[50,50,50,50,50,50,50,50,50,50] \\
-#     output.gain_directory={output_dir}/gains_peel \\
-#     output.log_directory={output_dir}/logs_peel \\
-#     output.overwrite=True \\
-#     output.products=[corrected_residual] \\
-#     output.columns=[PEELED_DATA] \\
-#     output.subtract_directions=[{subtract_dirs}] \\
-#     G.type=complex \\
-#     G.time_interval={g_time_interval} \\
-#     G.freq_interval={g_freq_interval} \\
-#     dE.type=complex \\
-#     dE.time_interval={de_time_interval} \\
-#     dE.freq_interval={de_freq_interval} \\
-#     dE.direction_dependent=True \\
-#     G.direction_dependent=False \\
-#     K.type=delay_and_offset \\
-#     K.solve_per=antenna \\
-#     K.direction_dependent=False \\
-#     K.pinned_directions=[0] \\
-#     K.time_interval=120 \\
-#     K.freq_interval=0 \\
-#     K.interp_mode=reim \\
-#     K.interp_method=2dlinear \\
-#     K.respect_scan_boundaries=True \\
-#     K.initial_estimate=False
-
-
-
-goquartical \\
+/opt/envs/quartical/bin/goquartical \\
     input_ms.path={ms_path} \\
     input_ms.data_column=DATA \\
-    input_ms.time_chunk=0 \\
+    input_ms.time_chunk={time_chunk} \\
     input_ms.freq_chunk=0 \\
     input_model.recipe={recipe} \\
     solver.terms=[K,dE] \\
@@ -233,8 +196,6 @@ goquartical \\
     K.respect_scan_boundaries=True \\
     K.initial_estimate=False
 
-
-
 if [ $? -ne 0 ]; then
     echo "ERROR: QuartiCal failed"
     exit 1
@@ -249,11 +210,10 @@ echo "SUCCESS: QuartiCal peeling complete -> PEELED_DATA"
     os.chmod(qc_script_file, 0o755)
     
     job = hk.submit(
-        command=f"bash {os.getcwd()}/{qc_script_file}",
+        command=f"cd {os.getcwd()}\n{preamble}\n{udocker} bash {os.getcwd()}/{qc_script_file}",
         name=f"quartical_peel_{field}",
         job_subdir=output_dir,
-        ppn=ppn,
-        walltime=resources.get('walltime', '04:00:00')
+        **submit_resources(resources, '04:00:00', ppn=ppn)
     )
     
     if not job.job_id:
@@ -262,7 +222,7 @@ echo "SUCCESS: QuartiCal peeling complete -> PEELED_DATA"
     
     logger.info(f"Submitted QuartiCal job: {job.job_id}")
     
-    results = hk.wait_and_check([job.job_id], whitelist=whitelist)
+    results = wait_and_check(hk, [job.job_id], whitelist=whitelist, logger=logger)
     job_result = results.get(job.job_id)
     if job_result:
         job_obj, log_result = job_result
@@ -283,9 +243,6 @@ echo "SUCCESS: QuartiCal peeling complete -> PEELED_DATA"
     image_prefix = f"{output_dir}/peeled_{field}"
     
     ws_script = f"""#!/bin/bash
-cd {os.getcwd()}
-{preamble}
-
 echo "=== Final WSClean for {field} ==="
 echo "Data column: PEELED_DATA"
 
@@ -297,7 +254,7 @@ wsclean \\
     -pol I \\
     -intervals-out 1 \\
     -data-column PEELED_DATA \\
-    -niter 50000 \\
+    -niter {niter} \\
     -auto-mask 7 \\
     -auto-threshold 3 \\
     -gain 0.1 \\
@@ -329,11 +286,10 @@ echo "SUCCESS: Final image created"
     os.chmod(ws_script_file, 0o755)
     
     job = hk.submit(
-        command=f"bash {os.getcwd()}/{ws_script_file}",
+        command=f"cd {os.getcwd()}\n{preamble}\n{udocker} bash {os.getcwd()}/{ws_script_file}",
         name=f"wsclean_peeled_{field}",
         job_subdir=output_dir,
-        ppn=config.resources.get('imaging', {}).get('ppn', 8),
-        walltime='04:00:00'
+        **submit_resources(config.resources.get('imaging', {}), walltime='04:00:00')
     )
     
     if not job.job_id:
@@ -342,7 +298,7 @@ echo "SUCCESS: Final image created"
     
     logger.info(f"Submitted WSClean job: {job.job_id}")
     
-    results = hk.wait_and_check([job.job_id], whitelist=whitelist)
+    results = wait_and_check(hk, [job.job_id], whitelist=whitelist, logger=logger)
     job_result = results.get(job.job_id)
     if job_result:
         job_obj, log_result = job_result

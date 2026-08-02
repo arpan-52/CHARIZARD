@@ -8,6 +8,9 @@ import time
 from typing import List, Optional, Dict
 
 from housekeeper import Housekeeper
+from ..general.jobs import wait_and_check
+from ..general.resources import submit_resources
+from ..container import build_udocker_prefix
 
 
 def run_initial_flagging(hk: Housekeeper,
@@ -39,7 +42,6 @@ def run_initial_flagging(hk: Housekeeper,
     logger.substep(f"Applying {flag_file} to {ms_names}...")
     
     env = config.environment
-    casa_path = env.get('casa_path', '')
     preamble = env.get('shell_preamble', '')
     resources = config.resources.get('flagging', config.resources.get('default', {}))
     ppn = resources.get('ppn', 4)
@@ -76,17 +78,17 @@ print("Applied {flag_file} to {ms_path}")
         with open(script_file, 'w') as f:
             f.write(casa_script)
         
+        udocker = build_udocker_prefix(config)
         command = f"""cd {os.getcwd()}
 {preamble}
-{casa_path}/bin/casa --nologger --nogui -c {script_file}
+{udocker} casa --nologger --nogui -c {script_file}
 """
         
         job = hk.submit(
             command=command,
             name=job_name,
             job_subdir=spw,
-            ppn=ppn,
-            walltime=resources.get('walltime', '04:00:00')
+            **submit_resources(resources, '04:00:00', ppn=ppn)
         )
         
         if job.job_id:
@@ -102,7 +104,7 @@ print("Applied {flag_file} to {ms_path}")
     
     # Wait for jobs
     logger.substep(f"Waiting for {len(job_ids)} initial flagging jobs...")
-    results = hk.wait_and_check(job_ids, whitelist=whitelist)
+    results = wait_and_check(hk, job_ids, whitelist=whitelist, logger=logger)
     
     successful = []
     failed = []
