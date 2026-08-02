@@ -13,6 +13,51 @@ from ..general.jobs import wait_and_check
 from ..general.resources import submit_resources
 from ..container import build_udocker_prefix
 
+# shadems lives in its own container env, like quartical/crystalball. It pins
+# datashader<0.17, which predates dask-expr and cannot coexist with the dask
+# that dask-ms needs in the main 312data env.
+SHADEMS_BIN = "/opt/envs/shadems/bin/shadems"
+
+# datashader 0.16.x imports dask.dataframe.core.DataFrame, removed when dask
+# made dask-expr the default. Forcing the legacy backend is what makes it work;
+# without this every shadems call dies with either
+#   AttributeError: module 'dask.dataframe.core' has no attribute 'DataFrame'
+# or
+#   TypeError: FrameBase.__init__() got an unexpected keyword argument 'meta'
+SHADEMS_ENV = "export DASK_DATAFRAME__QUERY_PLANNING=False"
+
+
+def _script_header(title: str, out_dir: str) -> str:
+    """Preamble shared by both plot scripts.
+
+    Deliberately does NOT use `set -e`: we want every plot attempted even if one
+    fails. Instead each shadems call is counted, and the script exits non-zero if
+    any failed - otherwise a totally broken shadems still exits 0 and the
+    pipeline logs the step as SUCCESS, which is exactly what hid this for a
+    whole run.
+    """
+    return f"""#!/bin/bash
+# {title}
+{SHADEMS_ENV}
+mkdir -p {out_dir}
+_fail=0
+shadems_run () {{
+    "$@" || {{ _fail=$((_fail+1)); echo "SHADEMS FAILED: $*" >&2; }}
+}}
+echo "{title}"
+
+"""
+
+
+def _script_footer(kind: str) -> str:
+    return f"""
+if [ "$_fail" -ne 0 ]; then
+    echo "ERROR: $_fail shadems command(s) failed" >&2
+    exit 1
+fi
+echo "{kind} plots complete!"
+"""
+
 
 def shadems_cmd(ms: str, xaxis: str, yaxis: str,
                 field: Optional[str] = None,
@@ -25,7 +70,7 @@ def shadems_cmd(ms: str, xaxis: str, yaxis: str,
                 xcanvas: int = 1200,
                 ycanvas: int = 900) -> str:
     """Build shadems command"""
-    cmd = ["shadems"]
+    cmd = ["shadems_run", SHADEMS_BIN]
     cmd += ["--xaxis", xaxis]
     cmd += ["--yaxis", yaxis]
     
@@ -57,12 +102,7 @@ def build_calibrator_plots_script(spw: str, cal_plan: Dict, do_polcal: bool = Fa
     out_dir = f"{spw}/plots"
     calibrators = cal_plan.get('all_calibrators', [])
     
-    script = f"""#!/bin/bash
-# Diagnostic plots for {ms_path}
-mkdir -p {out_dir}
-echo "Generating calibrator diagnostic plots..."
-
-"""
+    script = _script_header(f"Diagnostic plots for {ms_path}", out_dir)
     
     for cal in calibrators:
         script += f"""
@@ -70,11 +110,11 @@ echo "Generating calibrator diagnostic plots..."
 echo "Plotting {cal}..."
 
 # UV vs Amp
-{shadems_cmd(ms_path, "UV", "CORRECTED_DATA:amp", field=cal, colour_by="ANTENNA1",
+{shadems_cmd(ms_path, "uv", "CORRECTED_DATA:amp", field=cal, colour_by="ANTENNA1",
              iter_corr=True, out_dir=out_dir, suffix=f"_{cal}_uv_amp", title=f"{cal} UV vs Amp")}
 
 # UV vs Phase
-{shadems_cmd(ms_path, "UV", "CORRECTED_DATA:phase", field=cal, colour_by="ANTENNA1",
+{shadems_cmd(ms_path, "uv", "CORRECTED_DATA:phase", field=cal, colour_by="ANTENNA1",
              iter_corr=True, out_dir=out_dir, suffix=f"_{cal}_uv_phase", title=f"{cal} UV vs Phase")}
 
 # Freq vs Amp
@@ -124,7 +164,7 @@ echo "Plotting cross-hand correlations..."
 
 """
     
-    script += 'echo "Calibrator plots complete!"\n'
+    script += _script_footer("Calibrator")
     return script
 
 
@@ -134,19 +174,14 @@ def build_target_plots_script(spw: str, cal_plan: Dict) -> str:
     out_dir = f"{spw}/plots"
     targets = cal_plan.get('targets', [])
     
-    script = f"""#!/bin/bash
-# Diagnostic plots for {ms_path}
-mkdir -p {out_dir}
-echo "Generating target diagnostic plots..."
-
-"""
+    script = _script_header(f"Diagnostic plots for {ms_path}", out_dir)
     
     for target in targets:
         script += f"""
 # ===== {target} =====
 echo "Plotting {target}..."
 
-{shadems_cmd(ms_path, "UV", "CORRECTED_DATA:amp", field=target, colour_by="ANTENNA1",
+{shadems_cmd(ms_path, "uv", "CORRECTED_DATA:amp", field=target, colour_by="ANTENNA1",
              iter_corr=True, out_dir=out_dir, suffix=f"_{target}_uv_amp", title=f"{target} UV vs Amp")}
 
 {shadems_cmd(ms_path, "FREQ", "CORRECTED_DATA:amp", field=target, colour_by="SCAN_NUMBER",
@@ -157,7 +192,7 @@ echo "Plotting {target}..."
 
 """
     
-    script += 'echo "Target plots complete!"\n'
+    script += _script_footer("Target")
     return script
 
 

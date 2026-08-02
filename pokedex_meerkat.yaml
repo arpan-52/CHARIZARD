@@ -13,8 +13,9 @@
 #   J0242.5-2132   target
 #   J0521+1638     polcal (3C138) - NOT imaged, see targets override below
 #
-# No leakage/pol_angle set, so CHARIZARD splits XX,YY only, solves gaintype G
-# with parang=False, and images Stokes I.
+# FULL POLARISATION run: leakage + pol_angle are both set, so CHARIZARD splits
+# all 4 correlations, solves gaintype T with parang=True, runs Dflls leakage
+# and XYf+QU/xyamb, and images I,Q,U,V. Roughly 2x the data of a Stokes-I run.
 # =============================================================================
 
 environment:
@@ -75,10 +76,20 @@ sources:
       # and a full 6144px clean for nothing.
       targets: [J0159.8-0849, J0242.5-2132]
 
-      # Leave leakage/pol_angle unset for total intensity. Setting both would
-      # switch on full polcal (4-corr split, gaintype T, Dflls + XYf+QU).
-      # NOTE if you do: the bundled 3C138 model is L-band (p=0.075 at 1.4 GHz);
-      # at 2.19 GHz it is closer to p=0.10, so it needs S-band values first.
+      # Full polarisation. Setting BOTH of these switches on do_polcal:
+      # 4-correlation split, gaintype T, Dflls leakage + XYf+QU/xyamb, and
+      # selfcal images I,Q,U,V instead of I only.
+      #   leakage   -> Dflls actually solves on the bandpass field (J0408-6545).
+      #                SARAO prefer J1939-6342; J0408 is sanctioned but is
+      #                ~0.1% linearly polarised. J1939 is not in this track.
+      #   pol_angle -> J0521+1638 = 3C138, resolved via the alias table.
+      leakage: J0408-6545
+      pol_angle: J0521+1638
+
+      # The bundled 3C138 model is the L-band entry (p=0.075 @ 1.4 GHz; nearer
+      # 0.10 at 2.19 GHz). Left as-is deliberately: per SARAO the model only
+      # needs to be approximate, since it serves to resolve the X-Y phase
+      # ambiguity in xyamb rather than to set a flux scale.
 
     uvranges:
       # J0408-6545 has a ~1% double lobe 5.5' away. At S-band the smaller
@@ -124,7 +135,7 @@ flow:
 
       # factor is the single progression knob: each round multiplies niter by
       # it and divides threshold and solint by it.
-      loops: {phase: 3, amp_phase: 0, solint: 2min, min_solint: 30s, factor: 2}
+      loops: {phase: 4, amp_phase: 1, solint: 2min, min_solint: 30s, factor: 2}
       clean: {threshold: 0.0005, start_iters: 2000, min_threshold: 0.0}
 
 # Direction-dependent calibration. Left out deliberately for a first run -

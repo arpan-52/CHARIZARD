@@ -58,13 +58,26 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         'all_steps_requested': [],
     }
     
-    # Setup housekeeper
+    # Setup housekeeper.
+    #
+    # jobs_dir here is only a DEFAULT: `job_dir` in the scheduler config file
+    # overrides it. That matters because the scheduler writes its -o/-e output
+    # to this directory, and not every filesystem that can hold the data can
+    # also take scheduler output - on bhima, jobs write fine to /scratch but
+    # their .out files are never delivered there. Pointing job_dir at a
+    # different filesystem is the only fix, so it has to actually be honoured.
+    #
+    # Whichever path wins is also where wait_and_check() looks for logs, so the
+    # two can no longer disagree. They used to: job_dir was parsed into
+    # SchedulerConfig and then read by nothing, so setting it moved neither the
+    # logs nor the search, and every job was reported as "No log files found".
     hk = Housekeeper(
         config=scheduler_config,
         jobs_dir=os.path.join(config.working_dir, "jobs"),
         scheduler=config.environment.get('scheduler', 'pbs')
     )
-    
+    logger.info(f"Job scripts and logs: {hk.jobs_dir}")
+
     # Get settings from config
     flow = config.flow
     init_cal = flow.get('initial_calibration_flagging', {})

@@ -13,19 +13,48 @@ from typing import Optional
 DEFAULT_IMAGE = "apal52/charizard-pipeline:latest"
 DEFAULT_NAME = "charizard"
 
+# Thread-limit variables that must be forwarded into the container.
+#
+# udocker does NOT inherit the host environment. `export NUMBA_NUM_THREADS=8`
+# written into the generated job script stops dead at the container boundary,
+# and every library inside then sizes its pool from the NODE core count (64 on
+# bhima) even though PBS confined the job to ncpus=8. Measured on bhima04:
+# 209 threads per catboss process on an 8-core cpuset, 25% CPU, node loadavg
+# 193, and catboss's Prep stage at 1092 s. Forwarding these takes it to 13 s.
+#
+# Deliberately NOT udocker's --hostenv: that drags the host PATH and
+# LD_LIBRARY_PATH in too and breaks the container's bundled stacks.
+THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "NUMBA_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
+
 
 def build_udocker_prefix(config) -> str:
     """
     Build the udocker run prefix for a job submission command.
 
-    Automatically mounts working_dir and the MS directory.
-    Additional volumes can be specified in config.container.volumes.
+    Automatically mounts working_dir and the MS directory, and forwards the
+    scheduler's thread-limit env vars into the container (see THREAD_ENV_VARS -
+    udocker does not inherit them, and without this every library inside sizes
+    its thread pool from the node core count rather than the job's cpuset).
+
+    Additional volumes can be specified in config.container.volumes, and extra
+    environment variables in config.container.env.
+
+    The result is meant to be embedded in a shell script: it contains
+    ${VAR:+...} expansions that are resolved by bash at job run time.
 
     Args:
         config: PipelineConfig with container settings
 
     Returns:
-        str like: "udocker run --volume=X:X --volume=Y:Y <name>"
+        str like: "udocker run --workdir=W --volume=X:X
+                   ${OMP_NUM_THREADS:+--env=OMP_NUM_THREADS=$OMP_NUM_THREADS} <name>"
     """
     container = config.container
     name = container.get('name', DEFAULT_NAME)
@@ -49,7 +78,17 @@ def build_udocker_prefix(config) -> str:
             else:
                 volumes.append(f"--volume={v}:{v}")
 
-    return f"udocker run --workdir={wd} {' '.join(volumes)} {name}"
+    # Forward thread limits set by the scheduler (housekeeper exports these into
+    # the job script before this command runs). ${VAR:+...} expands to nothing
+    # when VAR is unset, so this is a no-op unless the scheduler actually set it.
+    env_flags = [f"${{{v}:+--env={v}=${v}}}" for v in THREAD_ENV_VARS]
+
+    # Explicit extras from pokedex.yaml: environment.container.env
+    for k, v in (container.get('env') or {}).items():
+        env_flags.append(f"--env={k}={v}")
+
+    return (f"udocker run --workdir={wd} {' '.join(volumes)} "
+            f"{' '.join(env_flags)} {name}")
 
 
 def setup_container(image: str = DEFAULT_IMAGE,
