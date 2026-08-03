@@ -66,16 +66,60 @@ config:
 charizard setup env
 ```
 
-If your CUDA libraries are at a non-standard path (common on HPC clusters):
+That pulls the image, creates the container, and — if this machine has a GPU —
+wires the host NVIDIA driver into it and verifies the whole stack really works
+(driver, cupy, jax, a compiled numba CUDA kernel, and catboss's own kernels).
+
+To be asked about every option instead of taking the defaults:
 
 ```bash
-charizard setup env --cuda-lib-path /usr/local/cuda/lib64
+charizard setup env -i
 ```
 
-To use a different container image:
+### GPU
+
+GPU support is a flag with three states:
+
+| Flag | Behaviour |
+|---|---|
+| *(default)* | Auto: enable if this host has a usable GPU, otherwise skip with a note |
+| `--gpu` | Require it. Setup **fails** if the GPU does not verify |
+| `--no-gpu` | Skip entirely; catboss flags on CPU |
+
+The driver libraries are auto-detected. Pass `--cuda-lib-path` to override:
+
+```bash
+charizard setup env --cuda-lib-path /usr/lib64
+```
+
+Note that setup deliberately does **not** trust udocker's own `--nvidia`
+injection. On hosts that ship both a 32- and a 64-bit driver tree, udocker
+takes `/usr/lib` first and can install a 32-bit `libcuda` into a 64-bit
+container. Nothing errors — cupy just fails to initialise and catboss reports
+`Mode: CPU only`. Setup checks the ELF class of every library, skips any that
+are 32-bit, and falls through to the next candidate directory.
+
+### Clusters where no single node has both network and a GPU
+
+Common on HPC: the login node can reach the registry but has no driver, and the
+GPU node has a driver but no outbound network. Run setup in two passes:
+
+```bash
+# on the login node — pull and create, skip the GPU
+charizard setup env --no-gpu
+
+# then inside a GPU job, against the container that already exists
+charizard setup env --gpu-only --gpu
+```
+
+`--gpu-only` never re-pulls or re-creates, so it is safe to repeat. `--skip-pull`
+is the same idea for a node that already has the image but needs re-creating.
+
+To use a different container image, or a udocker directory on shared scratch:
 
 ```bash
 charizard setup env --image yourrepo/yourimage:latest --name mycontainer
+charizard setup env --udocker-dir /lustre/$USER/udocker
 ```
 
 At the end of setup, CHARIZARD prints the `container:` block to add to your
@@ -326,15 +370,28 @@ working_dir/
 
 **GPU not working after setup**
 
-Run setup with `--cuda-lib-path` pointing to where `libcuda.so` lives on your
-system:
+Re-run the GPU step on the machine that actually has the GPU — setup prints a
+per-stage probe, and the first `FAIL` names the real cause:
 
 ```bash
-charizard setup env --cuda-lib-path /usr/local/nvidia/lib64
+charizard setup env --gpu-only --gpu
 ```
 
-Common locations: `/usr/lib`, `/usr/local/nvidia/lib64`,
-`/usr/local/cuda/lib64`.
+```
+  driver (libcuda)       OK   libcuda.so.1 loads
+  cupy                   OK   cupy 14.1.1, 1 device(s)
+  jax                    FAIL RuntimeError: jax sees no GPU
+```
+
+If the driver stage itself fails, point setup at the right directory:
+
+```bash
+charizard setup env --gpu-only --gpu --cuda-lib-path /usr/lib64
+```
+
+Common locations: `/usr/lib64`, `/usr/lib/x86_64-linux-gnu`, `/usr/lib`,
+`/usr/local/nvidia/lib64`, `/usr/local/cuda/compat`. Prefer the 64-bit tree —
+if your host has both, `/usr/lib` is usually the 32-bit one.
 
 **catboss fails with no GPU**
 

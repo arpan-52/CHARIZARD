@@ -130,11 +130,18 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  charizard setup env\n"
-            "  charizard setup env --image myrepo/myimage:latest --name mycontainer\n"
-            "  charizard setup env --cuda-lib-path /usr/lib\n"
+            "  charizard setup env                       # pull, create, GPU if present\n"
+            "  charizard setup env -i                    # ask for every option\n"
+            "  charizard setup env --gpu                 # require a working GPU\n"
+            "  charizard setup env --no-gpu              # CPU-only\n"
+            "  charizard setup env --cuda-lib-path /usr/lib64\n"
+            "  charizard setup env --gpu-only --gpu      # GPU step only, on a GPU node\n"
             "  charizard run pokedex.yaml\n"
             "  charizard run pokedex.yaml -s scheduler.yaml\n"
+            "\n"
+            "Clusters where no single node has both network and a GPU driver:\n"
+            "  charizard setup env --no-gpu              # on the login node\n"
+            "  charizard setup env --gpu-only --gpu      # inside a GPU job\n"
         )
     )
 
@@ -167,7 +174,47 @@ def parse_args():
         "--cuda-lib-path",
         default=None,
         metavar="PATH",
-        help="Path to host CUDA libs if auto-detect fails (e.g. /usr/lib)"
+        help="Host dir holding the NVIDIA driver libs (auto-detected if omitted). "
+             "Use it to override a bad guess, e.g. /usr/lib64"
+    )
+    env_parser.add_argument(
+        "--udocker-dir",
+        default=None,
+        metavar="PATH",
+        help="Sets $UDOCKER_DIR for the setup (default: $UDOCKER_DIR or ~/.udocker)"
+    )
+
+    # GPU is a tri-state, not a bool: "auto" must stay distinguishable from an
+    # explicit --gpu so that a GPU that fails to verify can be a hard error only
+    # when the user actually asked for one.
+    gpu_group = env_parser.add_mutually_exclusive_group()
+    gpu_group.add_argument(
+        "--gpu",
+        dest="gpu", action="store_const", const="on",
+        help="Require GPU support; setup FAILS if the GPU does not verify"
+    )
+    gpu_group.add_argument(
+        "--no-gpu",
+        dest="gpu", action="store_const", const="off",
+        help="Skip GPU setup entirely (CPU-only flagging)"
+    )
+    env_parser.set_defaults(gpu="auto")
+
+    env_parser.add_argument(
+        "--skip-pull",
+        action="store_true",
+        help="Reuse an already-pulled image (for nodes with no outbound network)"
+    )
+    env_parser.add_argument(
+        "--gpu-only",
+        action="store_true",
+        help="Only redo the GPU step against an existing container. Use from a "
+             "GPU node when the node that has network has no driver."
+    )
+    env_parser.add_argument(
+        "--interactive", "-i",
+        action="store_true",
+        help="Prompt for each option instead of taking the defaults"
     )
 
     # ── run ────────────────────────────────────────────────────────────────
@@ -200,7 +247,12 @@ def main():
         ok = setup_container(
             image=args.image,
             name=args.name,
-            cuda_lib_path=args.cuda_lib_path
+            cuda_lib_path=args.cuda_lib_path,
+            gpu=args.gpu,
+            skip_pull=args.skip_pull,
+            gpu_only=args.gpu_only,
+            udocker_dir=args.udocker_dir,
+            interactive=args.interactive,
         )
         sys.exit(0 if ok else 1)
 
