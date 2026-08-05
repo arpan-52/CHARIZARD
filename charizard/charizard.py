@@ -27,6 +27,7 @@ from typing import List, Optional, Dict
 
 from housekeeper import Housekeeper
 
+from .utils.container import ensure_mountpoints
 from .utils.general.ms_utils import get_ms_info
 from .utils.general.source_utils import build_calibration_plan
 from .utils.general.tracker import JobTracker
@@ -77,6 +78,13 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
         scheduler=config.environment.get('scheduler', 'pbs')
     )
     logger.info(f"Job scripts and logs: {hk.jobs_dir}")
+
+    # Must happen before ANY job is submitted. Every step below fans out one job
+    # per SPW against the same udocker container, and without this the first of
+    # them to finish deletes the shared working-directory mountpoint out of the
+    # container ROOT while its siblings are still using it as their CWD.
+    # See ensure_mountpoints() for the failure it prevents.
+    ensure_mountpoints(config, logger)
 
     # Get settings from config
     flow = config.flow
