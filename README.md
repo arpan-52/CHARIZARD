@@ -1,14 +1,33 @@
-<img src="image.png" alt="CHARIZARD" width="190" align="right">
+<p align="center">
+  <img src="image.png" alt="CHARIZARD" width="560">
+</p>
 
-# CHARIZARD
+<h1 align="center">CHARIZARD</h1>
 
-Radio interferometry calibration pipeline for VLA, WSRT and MeerKAT data.
+<p align="center">
+  <b>C</b>alibration and <b>H</b>ighly <b>A</b>utomated <b>R</b>adio <b>I</b>maging<br> with polari<b>Z</b>ation and <b>A</b>dvanced <b>R</b>eduction and <b>D</b>econvolution
+</p>
 
-One command takes you from a raw measurement set to self-calibrated, primary-beam-corrected
-images: splitting, RFI flagging, cross-calibration, polarisation calibration, self-cal, and
-direction-dependent peeling. It runs on your login node and farms every heavy step out to
-PBS or SLURM, with all the astronomy software inside a container — so your cluster needs
-Python and nothing else.
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.8+">
+  <img src="https://img.shields.io/badge/NumPy-013243?style=flat-square&logo=numpy&logoColor=white" alt="NumPy">
+  <img src="https://img.shields.io/badge/powered%20by-AstroPy-EC3E3E?style=flat-square" alt="Powered by AstroPy">
+  <img src="https://img.shields.io/badge/Docker-charizard--pipeline-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker image">
+  <img src="https://img.shields.io/badge/CUDA-13-76B900?style=flat-square&logo=nvidia&logoColor=white" alt="CUDA 13">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/CASA-6.7.3-005F9E?style=flat-square" alt="CASA 6.7.3">
+  <img src="https://img.shields.io/badge/WSClean-3.6-6F42C1?style=flat-square" alt="WSClean 3.6">
+  <img src="https://img.shields.io/badge/casacore-3.6.0-4B5563?style=flat-square" alt="casacore 3.6.0">
+  <img src="https://img.shields.io/badge/scheduler-PBS%20%7C%20SLURM-F97316?style=flat-square" alt="PBS or SLURM">
+  <img src="https://img.shields.io/badge/telescopes-JVLA%20%7C%20uGMRT%20%7C%20MeerKAT-0EA5E9?style=flat-square" alt="JVLA, uGMRT, MeerKAT">
+  <img src="https://img.shields.io/badge/License-MIT-22C55E?style=flat-square" alt="MIT License">
+</p>
+
+---
+
+Who wants to be a radio astronomer when you can become a Pokémon master? I always loved watching Pokémon as a series and over the years I dreamt of becoming one of the masters. Though that dream was never achieved, I still try to find similarities between my developed codes and the characters of my favourite Pokémons. I introduce CHARIZARD — a high-throughput, generic radio imaging pipeline which takes you from a raw measurement set to self-calibrated images: splitting, RFI flagging, cross-calibration, polarisation calibration, self-cal, and direction-dependent peeling. It runs on your login node and farms every heavy step out to compute nodes via PBS or SLURM, with all the astronomy software inside a container — so your cluster needs Python and nothing else. It submits jobs, tracks them, finds failures, and then if everything is alright greets you with nice images. It supports both circular and linear feed full polarisation calibration and has been heavily tested on uGMRT, JVLA and MeerKAT datasets. If your administrator does not allow even small processes to run on login nodes, submit CHARIZARD as a job and it then does the work from there.
 
 ```bash
 pip install -e .
