@@ -106,6 +106,28 @@ WSClean, catboss, PyBDSF, shadems, QuartiCal, CrystalBall — lives in the conta
 Once per machine, per user. udocker containers live under `~/.udocker`, so every user on a
 shared cluster runs this themselves.
 
+> **Check where udocker will put things first.** The default is `~/.udocker`, and the
+> unpacked image is around 37 GB. On most clusters `$HOME` is quota'd well below that, so
+> point udocker somewhere with room — scratch, project space, or wherever your allocation
+> lives:
+>
+> ```bash
+> charizard setup env --udocker-dir /scratch/$USER/udocker
+> ```
+>
+> Then export the **same** path in your `shell_preamble`, so the jobs look in the place
+> setup actually wrote to:
+>
+> ```yaml
+> shell_preamble: |
+>   source ~/.bashrc
+>   micromamba activate 312data
+>   export UDOCKER_DIR=/scratch/$USER/udocker
+> ```
+>
+> If the two disagree, setup succeeds and then every job fails with the container not
+> found. Setup prints the directory it used at the end — copy it from there.
+
 ```bash
 charizard setup env
 ```
@@ -458,14 +480,6 @@ a `shell_preamble` that does not activate an environment containing udocker.
 **Jobs die with `Failed AlwaysAssert getcwd`.** Concurrent jobs sharing one container were
 deleting each other's working directory. Fixed — make sure you are on a current checkout.
 
-## Known issues
-
-**Self-calibration over-flags.** RFI flagging currently runs on the target data at the start
-of every self-cal round, and the flags accumulate from round to round. On a MeerKAT S-band
-track this took the target from 31% flagged to 73% across five rounds, cost roughly 20–30%
-of the source flux, and left arc-like sidelobe residuals in the final images. Until this is
-reworked, keep `loops.phase` and `loops.amp_phase` low (1–2 each), and check the flag
-fraction in the self-cal MSs if images look worse than the dirty image.
 
 ## What's in the container
 
