@@ -35,6 +35,84 @@ THREAD_ENV_VARS = (
 )
 
 
+def _mount_pairs(config) -> list:
+    """(host_path, container_path) for every bind mount a job needs.
+
+    Single source of truth for both the --volume flags and the mountpoints that
+    must be pre-created inside the container ROOT (see ensure_mountpoints).
+    """
+    pairs = []
+
+    # Always mount working dir
+    wd = os.path.abspath(config.working_dir)
+    pairs.append((wd, wd))
+
+    # Mount MS directory if different
+    ms_dir = os.path.dirname(os.path.abspath(config.ms_path))
+    if ms_dir and ms_dir != wd:
+        pairs.append((ms_dir, ms_dir))
+
+    # User-specified extra volumes (format: "/src:/dst" or "/path")
+    for v in (config.container.get('volumes') or []):
+        if not v:
+            continue
+        if ':' in v:
+            src, dst = v.split(':', 1)
+            pairs.append((src, dst))
+        else:
+            pairs.append((v, v))
+
+    return pairs
+
+
+def ensure_mountpoints(config, logger=None) -> None:
+    """Pre-create the bind mountpoints inside the container ROOT.
+
+    THIS PREVENTS CONCURRENT JOBS FROM DESTROYING EACH OTHER'S WORKING DIRECTORY.
+
+    udocker creates each --volume target as a real directory inside the shared
+    container ROOT, and removes it (walking up its parents) when the job that
+    created it exits. Every charizard job runs the SAME container name, so a
+    whole SPW fan-out shares one ROOT. The first job to finish therefore deletes
+    ROOT/<working_dir> - which is also every sibling's --workdir, hence its CWD.
+    Their CWD becomes unlinked, getcwd() returns ENOENT, and casacore aborts
+    with
+
+        (/code/casa/OS/Path.cc : 407) Failed AlwaysAssert getcwd(temp, 1024)
+
+    after which every flag write fails with [Errno 2]. It is silent, partial and
+    duration-dependent: the longest-running job loses the most.
+
+    udocker's MountPoint.create() returns early WITHOUT registering a mountpoint
+    that already exists, and delete() only removes registered ones - so simply
+    pre-creating these directories takes udocker out of the loop entirely.
+
+    Measured on bhima04, two concurrent jobs, only the mountpoint owner differing:
+        udocker-created mountpoint : 91 getcwd failures, MS unreadable
+        pre-created mountpoint     :  0 failures, MS readable throughout
+
+    Not passing an absolute MS path instead: casacore calls getcwd() regardless
+    of whether the path is relative, so that fixes nothing (verified).
+    """
+    name = config.container.get('name', DEFAULT_NAME)
+    root = _find_container_root(name)
+    if not root:
+        if logger:
+            logger.warning(
+                f"Container '{name}' not found - cannot pre-create mountpoints. "
+                "Concurrent jobs may fail with 'Failed AlwaysAssert getcwd'. "
+                "Run 'charizard setup env' first.")
+        return
+
+    for _, cont_path in _mount_pairs(config):
+        target = os.path.join(root, cont_path.lstrip('/'))
+        try:
+            os.makedirs(target, exist_ok=True)
+        except OSError as e:
+            if logger:
+                logger.warning(f"Could not pre-create mountpoint {target}: {e}")
+
+
 def build_udocker_prefix(config) -> str:
     """
     Build the udocker run prefix for a job submission command.
@@ -60,24 +138,8 @@ def build_udocker_prefix(config) -> str:
     container = config.container
     name = container.get('name', DEFAULT_NAME)
 
-    volumes = []
-
-    # Always mount working dir
     wd = os.path.abspath(config.working_dir)
-    volumes.append(f"--volume={wd}:{wd}")
-
-    # Mount MS directory if different
-    ms_dir = os.path.dirname(os.path.abspath(config.ms_path))
-    if ms_dir and ms_dir != wd:
-        volumes.append(f"--volume={ms_dir}:{ms_dir}")
-
-    # User-specified extra volumes (format: "/src:/dst" or "/path")
-    for v in container.get('volumes', []):
-        if v:
-            if ':' in v:
-                volumes.append(f"--volume={v}")
-            else:
-                volumes.append(f"--volume={v}:{v}")
+    volumes = [f"--volume={h}:{c}" for h, c in _mount_pairs(config)]
 
     # Forward thread limits set by the scheduler (housekeeper exports these into
     # the job script before this command runs). ${VAR:+...} expands to nothing
