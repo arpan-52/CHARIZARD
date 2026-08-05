@@ -5,7 +5,7 @@
 <h1 align="center">CHARIZARD</h1>
 
 <p align="center">
-  <b>C</b>alibration and <b>H</b>ighly <b>A</b>utomated <b>R</b>adio <b>I</b>maging<br> with polari<b>Z</b>ation and <b>A</b>dvanced <b>R</b>eduction and <b>D</b>econvolution
+  <b>C</b>alibration and <b>H</b>ighly <b>A</b>utomated <b>R</b>adio <b>I</b>maging<br> with polari<b>Z</b>ation and <b>A</b>dvanced <b>R</b>esource and <b>D</b>istribution
 </p>
 
 <p align="center">
