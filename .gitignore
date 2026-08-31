@@ -118,5 +118,16 @@ CLAUDE.md
 # =========================
 paper/
 paper_aas/
+paper_v2/
+tr.tex
+
+# =========================
+# Data products / pipeline outputs
+# =========================
+# Images, cubes and test measurement sets are run artefacts, not source, and
+# are far over GitHub's 100 MB per-file limit (test_image/ alone is 991 MB).
+*.fits
+*.ms/
+test_image/
 
 

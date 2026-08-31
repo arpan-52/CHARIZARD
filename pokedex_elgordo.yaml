@@ -1,0 +1,163 @@
+# =============================================================================
+# CHARIZARD - MeerKAT S-band, FULL POLARISATION, cross-cal -> selfcal
+# Target: ElGordo (ACT-CL J0102-4915)
+# Observation: 1780802117, 07-Jun-2026 03:16-10:51 UTC, 'S1-band El Gordo REPEAT'
+#              61 scans / 31 compscans / 3406 dumps @ 8.015 s, 60 antennas
+# Cluster: NCRA bhima (OpenPBS)
+# =============================================================================
+# Usage: charizard run pokedex_elgordo.yaml -s scheduler_elgordo.yaml
+#
+# Fields in this MS (verified against the MS itself, not just the katdal report):
+#   J1939-6342    fluxcal bpcal delaycal    77 dumps, ONE scan  (03:16-03:26)
+#   J0133-5200    gaincal                  269 dumps, 22 scans bracketing target
+#   ElGordo       target                  2716 dumps, 12 x ~30 min
+#   J0408-6545    fluxcal bpcal delaycal   167 dumps, TWO scans (06:47, 10:41)
+#   J0521+1638    polcal (3C138)           177 dumps, TWO scans (08:04, 10:30)
+#
+# Verified: 4096 ch, 1968.750-2843.536 MHz, 1 SPW, CORR_TYPE [9,10,11,12] =
+# XX,XY,YX,YY (linear feeds), 60 antennas, MS is 1.5 TB on disk.
+#
+# NO DDCal - the dd_cal block is absent on purpose, so the pipeline stops after
+# the final selfcal images.
+# =============================================================================
+
+environment:
+  working_dir: /scratch/apal/elgordo
+  scheduler: pbs
+  shell_preamble: |
+    source ~/.bashrc
+    micromamba activate 312data
+    export UDOCKER_DIR=/home/apal/udocker
+
+  container:
+    image: apal52/charizard-pipeline:latest
+    name: charizard
+    # working_dir and the MS directory are both /scratch/apal/elgordo, and both
+    # are mounted automatically. Nothing extra needed.
+    volumes: []
+
+  # Walltimes MUST be quoted - unquoted 48:00:00 is YAML sexagesimal (an int).
+  #
+  # nodes MUST be 1. No job here is MPI; each is a single `udocker run
+  # casa|wsclean`. nodes>1 reserves hardware that sits idle.
+  #
+  # ppn stays 8 everywhere and MUST equal the *_NUM_THREADS values in
+  # scheduler_elgordo.yaml - that is what stops catboss spawning a 64-thread
+  # pool on an 8-core cpuset (measured 84x on this cluster).
+  #
+  # This input is ~4x the s_1_2 track (1.5 TB vs 387 GB), so walltimes are
+  # roughly doubled from that run. bhima's queue max is 72:00:00.
+  resources:
+    default:   {nodes: 1, ppn: 8,  walltime: "08:00:00", mem_gb: 64}
+    flagging:  {nodes: 1, ppn: 8,  walltime: "48:00:00", mem_gb: 200}
+    crosscal:  {nodes: 1, ppn: 8,  walltime: "48:00:00", mem_gb: 200}
+    selfcal:   {nodes: 1, ppn: 8,  walltime: "48:00:00", mem_gb: 200}
+    imaging:   {nodes: 1, ppn: 8,  walltime: "72:00:00", mem_gb: 400}
+
+data:
+  ms: 1780802117_2026-08-19T22-28-23_apH.ms
+  # 4096 ch -> 5% edge trim -> 3688 usable -> 922 ch per sub-band,
+  # ~197 MHz each at 213.623 kHz resolution.
+  processing_spw: 4
+
+sources:
+  # false: skip detection and trust the overrides below. REQUIRED for MeerKAT -
+  # the bundled calibrator catalog is VLA-only and has nothing below dec -45.
+  auto_detect: false
+
+  overrides:
+    calibrators:
+      # J0408-6545, NOT J1939-6342, and the reason is the leakage solve.
+      #
+      # For linear feeds CHARIZARD solves Dflls on amp_cal_list[0] - the flux
+      # calibrator IS the leakage calibrator, whatever `leakage:` below says
+      # (see gains.py, the `field='{amp_cal_list[0]}'` in the polcal call).
+      #
+      #   J0408-6545: two scans 4 h apart (06:47, 10:41) -> real parallactic
+      #               angle coverage for Dflls. 167 dumps for the bandpass.
+      #               No CASA standard, so CHARIZARD builds a manual setjy
+      #               model from the Partridge et al. (2016) log-polynomial.
+      #               This is the s_1_2 setup, which verified to -0.7% in flux
+      #               and 0.86% residual leakage.
+      #   J1939-6342: has a proper CASA standard (Stevens-Reynolds 2016) and is
+      #               the SARAO-preferred primary - but ONE 10-min scan at the
+      #               very start of the track. No PA coverage, so the leakage
+      #               solve would be badly constrained, and fewer dumps for the
+      #               bandpass. The better flux standard is not worth that.
+      amp: J0408-6545
+
+      # Single gain calibrator, bracketing every target scan (~15 min cal /
+      # 30 min target). applycal uses gainfield='nearest', so each target scan
+      # picks up the nearest solution in time.
+      phase: J0133-5200
+
+      # REQUIRED. Without this every unlisted field becomes a target, and
+      # J0521+1638 would go through selfcal and a full 8192px clean for nothing.
+      targets: [ElGordo]
+
+      # Full polarisation. Setting BOTH switches on do_polcal: 4-correlation
+      # split, gaintype T with parang=True, Dflls leakage + XYf+QU/xyamb, and
+      # final images in I, Q, U, V instead of I only.
+      #
+      # leakage is a switch here, not a selection - see the note under `amp`.
+      leakage: J0408-6545
+      # 3C138, resolved via the alias table. TWO scans 2.4 h apart (08:04 and
+      # 10:30) at different parallactic angle, so XYf+QU has real leverage to
+      # separate Q,U from the X-Y phase. Better constrained than the s_1_2
+      # track, which had only a single polcal scan.
+      #
+      # The bundled 3C138 model is the L-band entry (p=0.075 @ 1.4 GHz, nearer
+      # 0.10 at 2.4 GHz). Left as-is, same as s_1_2 - it resolves the ambiguity
+      # rather than setting the scale, but the absolute angle is only as good
+      # as that model.
+      pol_angle: J0521+1638
+
+    uvranges:
+      # J0408-6545 has a ~1% double lobe 5.5' away. At S-band the smaller
+      # primary beam suppresses it and a point model is adequate (Hugo 2022,
+      # Ranchod et al. 2024). Add a cut here only if the bandpass shows ripple.
+      {}
+
+flow:
+  initial_calibration_flagging:
+    setup: {brotherhood: true}                # all SPWs succeed together or all fail
+    flagging:
+      bad_antennas: {auto: true, list: []}    # add known-bad dishes to `list`
+      use_gpu: true                           # routes to bhima04 via the scheduler config
+    calibration:
+      # refant omitted on purpose -> auto-selected after flagging from the
+      # antennas actually present. This array is missing m030/m042/m047/m050.
+      # m033 IS present if you want to pin it: uncomment the line below.
+      # refant: m033
+      minblperant: 4                          # MeerKAT/IDIA convention
+      control: {plot: true}                   # shadems diagnostics
+
+  imaging_selfcal:
+    setup: {brotherhood: true}
+    dirty_image: true                         # sanity check before selfcal
+    selfcal:
+      avg_flag: true
+
+      # Channel averaging before selfcal. freqbin 4 -> ~0.85 MHz channels. At
+      # the ~0.3 deg half-power radius bandwidth smearing is ~0.1 of the
+      # synthesised beam - negligible.
+      freqbin: 4
+
+      # S-band, centre 2406 MHz (lambda 12.5 cm). 7.7 km max baseline ->
+      # ~3.3" naturally, ~4" at robust 0.0, so 0.8" gives ~5 px/beam.
+      # Primary beam FWHM is ~0.6 deg here; 8192 px x 0.8" = 1.82 deg covers it
+      # well past the half-power point, which matters for a 7.5 h track where
+      # far-out sources have enough SNR to leave sidelobes.
+      # NOTE: no primary beam correction is applied - fluxes far off axis are
+      # attenuated.
+      imaging: {imsize: 8192, cellsize: 0.8asec}
+
+      # 5 rounds: 4 phase-only + 1 amp+phase.
+      # factor is the single progression knob: each round multiplies niter by
+      # it and divides threshold and solint by it.
+      # solint runs 120 -> 60 -> 30 -> 30 s (floored), then 30 s for the ap
+      # round. Dump time is 8 s, so 30 s is ~4 dumps.
+      loops: {phase: 4, amp_phase: 1, solint: 2min, min_solint: 30s, factor: 2}
+      clean: {threshold: 0.0005, start_iters: 2000, min_threshold: 0.0}
+
+# NO dd_cal BLOCK - direction-dependent calibration is deliberately off.

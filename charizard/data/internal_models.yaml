@@ -89,7 +89,10 @@ known_polarized:
 # Full Stokes polarization models for polcal
 # Required for polarization angle calibration
 # NOTE: polarization_angle is in RADIANS (setjy convention) and is passed
-# to setjy / the XYf+QU helper as-is, with no unit conversion.
+# to setjy as-is, with no unit conversion.
+# rotation_measure is in rad/m^2 and is passed to setjy's rotmeas argument.
+# setjy applies chi(nu) = polangle + RM * lambda^2, so omitting it freezes the
+# model angle at reffreq across the band.
 polcal_models:
   3C286:
     ra: "13h31m08.29s"
@@ -100,6 +103,7 @@ polcal_models:
     reffreq: "1.4GHz"
     polarization_fraction: [0.095]
     polarization_angle: [0.5759587]  # radians (33 deg)
+    rotation_measure: -0.3           # rad/m^2 (SARAO: -0.3 +/- 0.1)
     notes: "Standard pol angle calibrator, stable"
   
   3C138:
@@ -111,6 +115,7 @@ polcal_models:
     reffreq: "1.4GHz"
     polarization_fraction: [0.075]
     polarization_angle: [-0.1745329]  # radians (-10 deg)
+    rotation_measure: -2.4            # rad/m^2 (SARAO: -2.4 +/- 0.1)
     notes: "VARIABLE - use 3C286 if possible"
 
   3C48:
@@ -122,4 +127,5 @@ polcal_models:
     reffreq: "1.4GHz"
     polarization_fraction: [0.005]
     polarization_angle: [0.4363323]  # radians (25 deg)
+    rotation_measure: 0.0            # not measured; leave 0
     notes: "Low polarization, flux calibrator"

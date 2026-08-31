@@ -56,7 +56,7 @@ def build_calibration_script(spw: str,
 
     Handles both circular and linear feeds:
     - Circular: gaintype=G, KCROSS, Df, Xf
-    - Linear: gaintype=T, Dflls, XYf+QU with xyamb()
+    - Linear: gaintype=T, Dflls, KCROSS, Xf
 
     Args:
         spw: SPW directory
@@ -159,6 +159,9 @@ def build_calibration_script(spw: str,
         reffreq = polcal_data.get('reffreq', '1.0GHz')
         pol_frac = polcal_data.get('polarization_fraction', [0.0])
         pol_angle = polcal_data.get('polarization_angle', [0.0])
+        # rad/m^2. setjy defaults this to 0.0; omitting it freezes the model
+        # angle at its reference frequency across the whole band.
+        rot_meas = polcal_data.get('rotation_measure', 0.0)
 
         script += f"""
 # Set polarization calibrator model (full Stokes)
@@ -169,7 +172,8 @@ setjy(vis='{spw}/cal.ms',
     spix={spectral_index},
     reffreq="{reffreq}",
     polindex={pol_frac},
-    polangle={pol_angle})
+    polangle={pol_angle},
+    rotmeas={rot_meas})
 """
 
     script += "\n# Delay calibration\n"
@@ -334,56 +338,48 @@ fluxscale(vis='{spw}/cal.ms',
         leakage_uvrange_param = f", uvrange='{leakage_uvrange}'" if leakage_uvrange else ""
 
         if pol_basis == 'linear':
-            # LINEAR FEEDS: XYf+QU with xyamb()
+            # LINEAR FEEDS: KCROSS + Xf
+            # Xf is anchored directly to the Stokes model that setjy wrote into
+            # MODEL_DATA, so there is no 180 deg branch ambiguity to resolve and
+            # no xyamb() call. KCROSS removes the residual cross-hand delay.
             script += f"""
-# X-Y phase calibration (linear feeds)
-from casarecipes.almapolhelpers import xyamb
-import numpy as np
-
-# Calculate Q, U from polarization model
-polcal_data = {polcal_models[polangle_cal]}
-pol_frac = polcal_data.get('polarization_fraction', [0.0])
-pol_angle = polcal_data.get('polarization_angle', [0.0])
-
-# Get mean frequency for Q, U calculation
-from casatools import msmetadata
-msmd = msmetadata()
-msmd.open('{spw}/cal.ms')
-meanfreq = msmd.meanfreq(0, unit='MHz')
-msmd.done()
-
-# Interpolate polarization at mean frequency (simplified)
-# pol_angle is in radians (setjy convention) - used as provided, no conversion
-p = pol_frac[0] if isinstance(pol_frac, list) else pol_frac
-pa = pol_angle[0] if isinstance(pol_angle, list) else pol_angle
-q = p * np.cos(2*pa)
-u = p * np.sin(2*pa)
-polqu = (q, u)
-print(f"Polarization Q,U = {{polqu}}")
-
-# X-Y phase with ambiguity
+# Cross-hand delay calibration (linear feeds)
 gaincal(vis='{spw}/cal.ms',
-    caltable='{spw}/caltables/xyamb.cal{cal_round}',
+    caltable='{spw}/caltables/delaycross.cal{cal_round}',
     field='{polangle_cal}',
     refant='{refant}',
+    gaintype='KCROSS',
     solint='inf',
     combine='scan',
-    gaintype='XYf+QU',
+    parang=True,
+    minsnr=3,
     minblperant={minblperant},
-    preavg=200.0,
     gaintable=['{spw}/caltables/delays.cal{cal_round}',
                '{spw}/caltables/bandpass.cal{cal_round}',
                '{spw}/caltables/leakage.cal{cal_round}',
                {flux_table}],
-    gainfield=['{amp_cal_list[0]}', '{amp_cal_list[0]}', '{amp_cal_list[0]}', '{polangle_cal}']{polang_uvrange_param})
+    gainfield=['{amp_cal_list[0]}', '{amp_cal_list[0]}',
+               '{amp_cal_list[0]}', '{polangle_cal}']{polang_uvrange_param})
 
-# Resolve X-Y phase ambiguity
-S = xyamb(xytab='{spw}/caltables/xyamb.cal{cal_round}',
-          qu=polqu,
-          xyout='{spw}/caltables/xyphase.cal{cal_round}')
+# Polarization angle calibration (linear feeds)
+polcal(vis='{spw}/cal.ms',
+    caltable='{spw}/caltables/polangle.cal{cal_round}',
+    field='{polangle_cal}',
+    refant='{refant}',
+    solint='inf',
+    combine='scan',
+    poltype='Xf',
+    preavg=200.0,
+    gaintable=['{spw}/caltables/delays.cal{cal_round}',
+               '{spw}/caltables/bandpass.cal{cal_round}',
+               '{spw}/caltables/leakage.cal{cal_round}',
+               {flux_table},
+               '{spw}/caltables/delaycross.cal{cal_round}'],
+    gainfield=['{amp_cal_list[0]}', '{amp_cal_list[0]}', '{amp_cal_list[0]}',
+               '{polangle_cal}', '{polangle_cal}']{polang_uvrange_param})
 
-# Flag outliers
-flagdata(vis='{spw}/caltables/xyphase.cal{cal_round}',
+# Flag outliers in polarization angle table
+flagdata(vis='{spw}/caltables/polangle.cal{cal_round}',
     datacolumn='CPARAM',
     mode='rflag',
     timedevscale=5.0,

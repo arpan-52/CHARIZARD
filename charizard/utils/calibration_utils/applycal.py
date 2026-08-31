@@ -25,7 +25,7 @@ def build_applycal_script(spw: str,
 
     Handles both circular and linear feeds:
     - Circular: delays, bandpass, gain, delaycross, leakage, polangle
-    - Linear: bandpass, leakage, gain, xyphase
+    - Linear: bandpass, leakage, gain, delaycross, polangle
 
     Args:
         spw: SPW directory
@@ -60,8 +60,11 @@ def build_applycal_script(spw: str,
         else:
             gaintables.append(f"{spw}/caltables/amp_phase.cal{cal_round}")
 
-        if do_polcal and os.path.exists(f"{spw}/caltables/xyphase.cal{cal_round}"):
-            gaintables.append(f"{spw}/caltables/xyphase.cal{cal_round}")
+        if do_polcal:
+            for pt in (f"{spw}/caltables/delaycross.cal{cal_round}",
+                       f"{spw}/caltables/polangle.cal{cal_round}"):
+                if os.path.exists(pt):
+                    gaintables.append(pt)
     else:
         # Circular feeds: delays, bandpass, gain, polcal tables
         gaintables = [
