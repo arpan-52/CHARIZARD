@@ -785,9 +785,7 @@ def charizard(config, logger, scheduler_config: Optional[str] = None,
                     else:
                         active_spws_sc = result_spws
 
-                    # NIMKI is deliberately not run here. It is a calibrator-only
-                    # flagger: its UV-domain Gabor model assumes a compact source,
-                    # which is exactly what a target field is not.
+                    # NIMKI is deliberately not run here. It is a calibrator-only for now
                     logger.info("Initial selfcal flagging complete")
             
             # Dirty image if requested
